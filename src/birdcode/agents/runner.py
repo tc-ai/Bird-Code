@@ -41,6 +41,9 @@ log = get_logger("birdcode.agents.runner")
 
 MAX_SPAWN_DEPTH = 1  # 递归硬禁止(子工具表本就不含 Agent;此为防御性 belt-and-suspenders)
 
+# agent teams:mailbox 关闭信号。teammate run() 循环 await mailbox.get() 据此干净终止。
+_TEAMMATE_SHUTDOWN = object()
+
 
 class ParentProvider(Protocol):
     """resolve_profile / AgentTool 等跨模块共用的父 provider 视图:一个 .profile 属性。
@@ -142,6 +145,21 @@ def build_child_gate(
     return parent_gate  # 回退:非 UiPermissionGate,复用父(不常见)
 
 
+_WORKTREE_ADDENDUM = (
+    "\n\n【worktree 模式】你的工作目录是一个独立 git worktree(路径见环境块「工作目录」)。"
+    "完成后,在最终报告里说明:产物落在哪个 worktree、改/建了哪些文件"
+    "——主 agent 据此定位你的成果。"
+)
+
+
+def _system_override(defn: AgentDefinition, isolation: str | None) -> str:
+    """子 agent system_prompt;worktree 模式追加产物报告提示(让最终 assistant 可靠报产物路径)。"""
+    sp = defn.system_prompt or ""
+    if isolation == "worktree":
+        return sp + _WORKTREE_ADDENDUM
+    return sp
+
+
 @dataclass
 class SubagentReport:
     is_completed: bool
@@ -213,6 +231,7 @@ class SubagentRunner:
         project_root: Path,
         root: Path | None = None,
         progress_cb: Callable[..., Awaitable[None]] | None = None,
+        mailbox: asyncio.Queue | None = None,
     ) -> None:
         self.defn = defn
         self.prompt = prompt
@@ -232,6 +251,7 @@ class SubagentRunner:
         self.project_root = project_root
         self.root = root
         self.progress_cb = progress_cb
+        self.mailbox = mailbox  # agent teams:非空→长驻 teammate 循环;None→一次性(原行为)
         self.agent_id = f"sub-{_uuid.uuid4().hex[:12]}"
         self._worktree_name = worktree_store_name(ctx.cwd)  # 侧链与主会话同 worktree/<name>/
         self.sidechain_path = paths.subagent_jsonl_path(
@@ -372,7 +392,8 @@ class SubagentRunner:
                     mcp_instructions = getter
             child_provider = build_provider(
                 profile, self.cfg, registry=child_registry,
-                system_override=self.defn.system_prompt, mcp_instructions=mcp_instructions,
+                system_override=_system_override(self.defn, self.isolation),
+                mcp_instructions=mcp_instructions,
             )
             _update_meta(meta_path, status="running")
             turn = Turn(messages=[Message(role="user", content=[TextBlock(text=self.prompt)])])
@@ -380,10 +401,30 @@ class SubagentRunner:
             # (assistant / tool_result),不会回写初始 user turn 消息——与 TurnController._process
             # 一致,此处手动落盘,使侧链含完整对话(user + assistant ≥ 2 行)。
             await store.append(turn.messages[0])
-            await run_agent_loop(
-                provider=child_provider, turn=turn, history=[], executor=child_executor,
-                emit=_emit, on_message=_on_message, context=None,
-            )
+            history: list[Turn] = []
+            # agent teams:mailbox 非空 → 长驻 teammate 循环(run→park→wake→run);否则
+            # 一次性 subagent(一轮即止,原行为)。run_agent_loop 返回 = 一轮自然结束(无
+            # tool_use):一次性据此报完成;teammate 据此 park 等 mailbox。history 跨轮累积
+            # (teammate 长驻本质);run_agent_loop 以 history 为只读先验上下文(context=None)。
+            while True:
+                await run_agent_loop(
+                    provider=child_provider, turn=turn, history=history,
+                    executor=child_executor, emit=_emit, on_message=_on_message, context=None,
+                )
+                if self.mailbox is None:
+                    break  # 一次性:一轮即止(原行为)
+                if error_msg is not None:
+                    break  # teammate:护栏/Provider Error→终止(post-loop 报 error)
+                history.append(turn)
+                _update_meta(meta_path, status="idle")
+                item = await self.mailbox.get()  # park:阻塞到 mailbox 有消息
+                if item is _TEAMMATE_SHUTDOWN:
+                    break  # 关闭信号→干净终止
+                _update_meta(meta_path, status="running")
+                # item 是 MailboxMessage:加"[来自 sender]:"前缀,让收方知道谁发的
+                text = f"[来自 {item.sender}]: {item.content}"
+                turn = Turn(messages=[Message(role="user", content=[TextBlock(text=text)])])
+                await store.append(turn.messages[0])  # 新轮种子 user 消息落盘
             if error_msg is not None:
                 # 护栏 / provider Error 终止:run_agent_loop 已正常 return,但子 agent 并未真正
                 # 完成。报 error + 把护栏消息回传主 agent(否则空正文被当成功)。

@@ -21,6 +21,7 @@ from birdcode.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from birdcode.agent.context import ContextManager
+    from birdcode.agents.mailbox import MailboxMessage
     from birdcode.memory.extractor import MemoryManager
     from birdcode.permission.rules import Rule
     from birdcode.session.store import SessionStore
@@ -165,6 +166,21 @@ class TurnController:
             self._drain_task = task
             task.add_done_callback(self._on_drain_done)
 
+    def receive(self, msg: MailboxMessage) -> None:
+        """teammate 发来的消息:格式化 str 入队,空闲时后台起 _drain(不阻塞投递方,仿 notify_wake)。
+
+        与 submit(用户输入,空闲时 await drain)和 notify_wake(系统注入)并列:teammate 消息
+        走 str 分派(_drain→_process),与 _WakeInput(_process_wake)井水不犯河水。现有
+        user/notify_wake/异步子 agent 通知流程全不变。
+        """
+        text = f"[来自 {msg.sender}]: {msg.content}"
+        self._queue.enqueue(text)
+        if not self.busy:
+            self.busy = True
+            task = asyncio.create_task(self._drain())
+            self._drain_task = task
+            task.add_done_callback(self._on_drain_done)
+
     def _on_drain_done(self, task: asyncio.Task[None]) -> None:
         """后台 drain 完成回调:按身份清引用(防覆盖更新的 drain task)+ 记录未检索异常。"""
         if self._drain_task is task:
@@ -270,7 +286,16 @@ class TurnController:
         FIFO、Esc 中断、/clear abort 语义不变(_process/_consume 原样复用;abort 清空队列时
         _WakeInput 一并丢弃)。submit 空闲路径 await 本方法(同步语义);notify_wake 空闲路径
         create_task 本方法(后台),二者共享同一 drain 循环,绝不并发起两个 drain。
+
+        _drain 跑在 lead 的 TurnController 内,恒以 "lead" 身份运行:receive 经 teammate task
+        调用 create_task(_drain) 时,新 task 会复制投递方(teammate)的 context(_AGENT_NAME=
+        teammate 名);不在本处钉回,lead 本轮(run_agent_loop 及其工具调用)会把 SendMessage/
+        TaskCreate 的 sender 误归属到该 teammate。显式 set("lead") 只影响本 drain task 的 context
+        副本(create_task 拷贝 / submit 的主任务本就是 lead),不污染原 teammate task。
         """
+        from birdcode.agents.mailbox import _AGENT_NAME
+
+        _AGENT_NAME.set("lead")
         try:
             while True:
                 item = self._queue.dequeue_nowait()

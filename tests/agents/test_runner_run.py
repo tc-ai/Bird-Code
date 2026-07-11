@@ -275,3 +275,17 @@ async def test_run_progress_cb_failure_isolated(tmp_path):
     report = await r.run()
     assert report.status == "completed"  # 非 error
     assert report.is_completed is True
+
+
+def test_system_override_appends_worktree_addendum():
+    """worktree 子 agent 的 system_prompt 追加产物报告提示;非 worktree 不加。
+
+    抽成 _system_override 函数单测(免真 git worktree):worktree → SP+addendum;否则原 SP。
+    """
+    from birdcode.agents.runner import _WORKTREE_ADDENDUM, _system_override
+
+    defn = AgentDefinition(name="general-purpose", description="d", system_prompt="SP")
+    assert _system_override(defn, None) == "SP"
+    assert _system_override(defn, "worktree") == "SP" + _WORKTREE_ADDENDUM
+    over = _system_override(defn, "worktree")
+    assert "worktree" in over and "报告" in over and "文件" in over

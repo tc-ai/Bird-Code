@@ -11,6 +11,7 @@ from birdcode.agent.provider import (
     TokenUsage,
     TurnStart,
 )
+from birdcode.agents.mailbox import MailboxMessage
 from birdcode.conversation import TurnController
 
 
@@ -369,3 +370,62 @@ async def _noop_event(ev):  # noqa: ARG001 - 占位回调
 
 async def _noop_status():
     return None
+
+
+@pytest.mark.asyncio
+async def test_receive_runs_turn_with_sender_prefix():
+    """TurnController.receive(MailboxMessage) → 后台起一轮,Turn 含'[来自 sender]:'。
+
+    receive 仿 notify_wake(后台 _drain,不阻塞投递方);teammate 消息走 str→_process,
+    与 user submit / _WakeInput 通道互不干扰。
+    """
+    received = []
+
+    async def on_event(ev):
+        received.append(ev)
+
+    async def on_status(): ...
+
+    p = FakeProvider([TextDelta(text="ok"), Done(usage=TokenUsage())])
+    ctrl = TurnController(p, on_event=on_event, on_status=on_status)
+    ctrl.receive(MailboxMessage(sender="bob", to="lead", content="done"))
+    for _ in range(100):  # receive 后台起 drain → 轮询 history 直到轮落地
+        if len(ctrl.history) >= 1:
+            break
+        await asyncio.sleep(0.01)
+    assert len(ctrl.history) == 1
+    user_text = ctrl.history[0].messages[0].content[0].text
+    assert "[来自 bob]" in user_text and "done" in user_text
+    assert ctrl.busy is False
+
+
+@pytest.mark.asyncio
+async def test_receive_drain_runs_as_lead_not_teammate():
+    """#2 回归:receive 经 teammate task 调 create_task(_drain),新 task 复制投递方的 _AGENT_NAME。
+
+    若 _drain 不钉回 "lead",lead 本轮(由 receive 唤醒)的 provider/工具会把 sender 误归属到
+    投递方 teammate。本测试在 _AGENT_NAME="teammate_bob" 的上下文里调 receive,断言 lead 轮
+    provider 读到的 _AGENT_NAME 是 "lead"(证明 _drain 内 set("lead") 生效,且只影响 drain task
+    的 context 副本,未污染投递方)。
+    """
+    from birdcode.agents.mailbox import _AGENT_NAME
+
+    captured: list[str] = []
+
+    class _NameProbe:
+        async def stream(self, messages, *, history):  # noqa: ARG002
+            captured.append(_AGENT_NAME.get())
+            yield TextDelta(text="ok")
+            yield Done(usage=TokenUsage())
+
+    ctrl = TurnController(_NameProbe(), on_event=_noop_event, on_status=_noop_status)
+    token = _AGENT_NAME.set("teammate_bob")  # 模拟 teammate 上下文调用 deliver(=receive)
+    try:
+        ctrl.receive(MailboxMessage(sender="bob", to="lead", content="done"))
+    finally:
+        _AGENT_NAME.reset(token)
+    for _ in range(100):  # 等 receive 的后台 drain 跑完一轮(provider 记下 _AGENT_NAME)
+        if captured:
+            break
+        await asyncio.sleep(0.01)
+    assert captured == ["lead"], "lead 轮的 _AGENT_NAME 应钉为 lead,而非投递方 teammate"

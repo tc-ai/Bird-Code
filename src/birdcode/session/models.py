@@ -124,7 +124,7 @@ class SubagentMeta(BaseModel):
     is_async: bool = Field(False, alias="isAsync")
     model: str = ""
     resolved_model: str | None = Field(None, alias="resolvedModel")
-    status: Literal["launched", "running", "completed", "error", "cancelled"] = "launched"
+    status: Literal["launched", "running", "idle", "completed", "error", "cancelled"] = "launched"
     spawned_at: str = Field("", alias="spawnedAt")
     completed_at: str | None = Field(None, alias="completedAt")
     total_duration_ms: int | None = Field(None, alias="totalDurationMs")
