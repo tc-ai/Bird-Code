@@ -255,6 +255,81 @@ async def _review(ctx: CommandContext, _args: str) -> None:
     await ctx.send_user_message(_REVIEW_PROMPT.format(diff=diff))
 
 
+async def _agents(ctx: CommandContext, args: str) -> None:
+    """P5:agent teams 观察/操控。
+
+    /agents                列 teammate(name/status/desc)
+    /agents <name> <msg>   给 teammate 发消息(唤醒 park 中的它续跑)
+    /agents stop <name>    打断 teammate(cancel)
+    /agents view <name>    看 teammate transcript
+    """
+    mgr = ctx.team_mgr
+    if mgr is None:
+        await ctx.show_message("(agent teams 未启用;需 cfg/store)")
+        return
+    parts = args.split(maxsplit=1) if args.strip() else []
+
+    if not parts:
+        info = ctx.list_teammates()
+        if not info:
+            await ctx.show_message(
+                "(无 teammate;lead 可调 SpawnTeammate 起一个,或 /agents <name> <msg>)"
+            )
+            return
+        lines = [f"teammate({len(info)}):"]
+        for t in info:
+            lines.append(f"  {t['name']}  [{t['status']}]  {t['description']}")
+        lines.append("用法:/agents <name> <消息> | stop <name> | view <name>")
+        await ctx.show_message("\n".join(lines))
+        return
+
+    head = parts[0]
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if head == "stop":
+        h = mgr.handle(rest)
+        if h is None:
+            await ctx.show_message(f"未知 teammate: {rest}", kind="warn")
+            return
+        h.cancel()
+        await ctx.show_message(f"已打断 teammate {rest}")
+        return
+
+    if head == "view":
+        h = mgr.handle(rest)
+        if h is None:
+            await ctx.show_message(f"未知 teammate: {rest}", kind="warn")
+            return
+        turns = ctx.read_teammate_transcript(h.agent_id)
+        if not turns:
+            await ctx.show_message(f"{rest} 无 transcript")
+            return
+        lines = [f"=== {rest} transcript ==="]
+        for turn in turns:
+            for m in turn.messages:
+                for b in m.content:
+                    text = getattr(b, "text", None)
+                    if text:
+                        lines.append(f"[{m.role}] {text[:200]}")
+        await ctx.show_message("\n".join(lines))
+        return
+
+    # /agents <name> <message>
+    if not rest:
+        await ctx.show_message(f"用法:/agents {head} <消息>", kind="warn")
+        return
+    h = mgr.handle(head)
+    if h is None:
+        await ctx.show_message(f"未知 teammate: {head}(用 /agents 查看列表)", kind="warn")
+        return
+    try:
+        await h.send(rest, sender="lead")
+    except RuntimeError as e:
+        await ctx.show_message(str(e), kind="warn")
+        return
+    await ctx.show_message(f"已发给 {head}: {rest[:60]}")
+
+
 def build_builtin_registry() -> CommandRegistry:
     r = CommandRegistry()
     # help 闭包持有 r(局部变量),运行时(已填满)才读 names()
@@ -349,6 +424,15 @@ def build_builtin_registry() -> CommandRegistry:
             usage="/review",
             type=CommandType.PROMPT,
             handler=_review,
+        )
+    )
+    r.register(
+        Command(
+            name="/agents",
+            description="观察/操控 teammate(teams)",
+            usage="/agents [name <msg> | stop <name> | view <name>]",
+            type=CommandType.LOCAL,
+            handler=_agents,
         )
     )
     return r

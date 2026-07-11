@@ -27,11 +27,21 @@ class TeammateHandle:
     _task: asyncio.Task
 
     async def send(self, prompt: str, *, sender: str = "lead") -> None:
-        """poke:投一条消息(包成 MailboxMessage)进 mailbox,唤醒 park 中的 teammate 续跑。"""
+        """poke:投一条消息(包成 MailboxMessage)进 mailbox,唤醒 park 中的 teammate 续跑。
+
+        已结束(task.done)→ raise,不静默丢(/agents 发消息给死 teammate 应明确报错)。
+        """
+        if self._task.done():
+            raise RuntimeError(f"teammate {self.name} 已结束,无法投递消息")
         self.mailbox.put_nowait(MailboxMessage(sender=sender, to=self.name, content=prompt))
 
     def shutdown(self) -> None:
-        """干净终止:投 SHUTDOWN 哨兵,teammate 跑完当前轮后退出(report=completed)。"""
+        """干净终止:投 SHUTDOWN 哨兵,teammate 跑完当前轮后退出(report=completed)。
+
+        已结束 → 幂等 no-op(不重复投、不抛)。
+        """
+        if self._task.done():
+            return
         self.mailbox.put_nowait(_TEAMMATE_SHUTDOWN)
 
     def cancel(self) -> None:
@@ -77,6 +87,7 @@ class TeamManager:
 
     def __init__(self) -> None:
         self._recipients: dict[str, Callable[[MailboxMessage], None]] = {}
+        self._handles: dict[str, TeammateHandle] = {}  # name→handle(cancel_all/shutdown_all 用)
         self.task_board: TaskBoard = TaskBoard()  # flat 共享看板(无 Lock,同步原子)
 
     def register(self, name: str, deliver: Callable[[MailboxMessage], None]) -> None:
@@ -92,6 +103,14 @@ class TeamManager:
     def names(self) -> list[str]:
         return list(self._recipients)
 
+    def teammates(self) -> list[tuple[str, TeammateHandle]]:
+        """列当前 teammate(name, handle),供 /agents UI 观察/打断/发消息。"""
+        return list(self._handles.items())
+
+    def handle(self, name: str) -> TeammateHandle | None:
+        """取某 teammate 的 handle(interrupt/send 用);未注册 → None。"""
+        return self._handles.get(name)
+
     async def spawn(self, name: str, runner: SubagentRunner) -> TeammateHandle:
         """spawn teammate + 注册其 mailbox.put_nowait 为 deliver;task 结束自动注销。
 
@@ -102,11 +121,48 @@ class TeamManager:
         handle = await spawn_teammate(name=name, runner=runner)
         deliver = handle.mailbox.put_nowait  # deliver(msg)=mailbox.put_nowait(msg)
         self.register(name, deliver)
+        self._handles[name] = handle
 
         def _on_done(_t: asyncio.Task[None]) -> None:  # noqa: ARG005 - _t 必需签名
-            # 身份校验避重名误删:仅当 name 仍指向本 teammate 的 deliver 才注销。
+            # 身份校验避重名误删:仅当 name 仍指向本 teammate 的 deliver/handle 才清。
             if self._recipients.get(name) is deliver:
                 self.unregister(name)
+            if self._handles.get(name) is handle:
+                self._handles.pop(name, None)
+            # #4:teammate 完成(非 cancel)→ 通知 lead(report 摘要注入 lead session)。
+            # lead 经此自动知晓 teammate 干完;cancel(用户打断/Esc)不通知(非正常完成)。
+            if not _t.cancelled():
+                try:
+                    report = _t.result()
+                    lead_deliver = self._recipients.get("lead")
+                    if lead_deliver is not None and report is not None:
+                        lead_deliver(MailboxMessage(
+                            sender=name, to="lead",
+                            content=f"[teammate 完成] {getattr(report, 'text', '')[:500]}",
+                        ))
+                except Exception:  # noqa: BLE001 - 通知失败不杀 cleanup 路径
+                    pass
 
         handle._task.add_done_callback(_on_done)
         return handle
+
+    def cancel_all(self) -> None:
+        """硬取消所有 teammate(Esc 风格,CancelledError→meta cancelled)。action_interrupt 用。"""
+        for handle in list(self._handles.values()):
+            handle.cancel()
+
+    def shutdown_all(self) -> None:
+        """干净终止所有 teammate(SHUTDOWN 哨兵→跑完当前轮后 completed)。clear/退出用。"""
+        for handle in list(self._handles.values()):
+            handle.shutdown()
+
+    def reset(self) -> None:
+        """新 session 重置(/clear 用):cancel 所有 teammate + 清 registry/board。
+
+        工具持的 team_mgr 引用不变(只清内部状态),故 /clear 后无需重注册 team 工具。
+        cancel_all 用 task.cancel(同步调度),teammate 异步收 CancelledError 终止。
+        """
+        self.cancel_all()
+        self._recipients.clear()
+        self._handles.clear()
+        self.task_board = TaskBoard()

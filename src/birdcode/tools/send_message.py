@@ -31,6 +31,8 @@ class SendMessageTool(Tool):
     parameters = SendMessageInput
     kind = "write"
     parallel_safe = False
+    gate_exempt = True  # 纯内存(投 mailbox queue),无 FS/命令副作用;async teammate 需免 gate
+    team_scoped = True  # 仅 teammate(mailbox)继承;一次性 subagent 排除
 
     def __init__(self, team: TeamManager) -> None:
         super().__init__()

@@ -530,3 +530,458 @@ async def test_spawn_name_reuse_does_not_orphan_second(tmp_path, monkeypatch):
     # 清理 bob2(免悬挂)
     mb2.put_nowait(_TEAMMATE_SHUTDOWN)
     await h2.join()
+
+
+async def test_pull_claim_complete_e2e(tmp_path, monkeypatch):
+    """T5/P3 端到端:teammate bob 经 pull 流程 List(pending)→Claim→Update(completed)。
+
+    lead 预建 pending unassigned 任务;bob 经完整 executor 路径发三个 tool call:
+    TaskList(pending) 看可抢的 → TaskClaim 原子领取 → TaskUpdate 标完成。看板最终
+    #1 = completed + assignee=bob(claim 落 bob 名下)。
+    """
+    from birdcode.agents import runner
+    from birdcode.agents.teammate import TeamManager
+    from birdcode.tools.registry import ToolRegistry
+    from birdcode.tools.task_tools import TaskClaimTool, TaskListTool, TaskUpdateTool
+
+    team = TeamManager()
+    team.task_board.create(title="review auth", created_by="lead")  # #1 pending unassigned
+
+    parent_reg = ToolRegistry()  # bob 经 build_child_registry 继承三个 task 工具
+    parent_reg.register(TaskListTool(team))
+    parent_reg.register(TaskClaimTool(team))
+    parent_reg.register(TaskUpdateTool(team))
+
+    calls = [
+        ("TaskList", {"status": "pending"}),
+        ("TaskClaim", {"id": "1"}),
+        ("TaskUpdate", {"id": "1", "status": "completed"}),
+    ]
+
+    def _builder(profile, app, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _ToolCallsProvider(profile, calls)
+
+    monkeypatch.setattr(runner, "build_provider", _builder)
+
+    mailbox: asyncio.Queue = asyncio.Queue()
+    mailbox.put_nowait(_TEAMMATE_SHUTDOWN)  # bob 跑完轮1(3 tool call)→park→SHUTDOWN→终止
+    r = SubagentRunner(
+        defn=_defn(), prompt="bob 起步", description="d", tool_use_id="call_p3e2e",
+        model_override="", spawn_depth=1, is_async=True,
+        parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+        parent_registry=parent_reg, parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
+        project_root=tmp_path, root=tmp_path, mailbox=mailbox,
+    )
+    handle = await team.spawn("bob", r)
+    await handle.join()
+
+    t = team.task_board.get("1")
+    assert t is not None
+    assert t.status == "completed"
+    assert t.assignee == "bob"  # claim 把任务落到了 bob 名下(pull 成功)
+
+
+async def test_dependency_unblock_claim_e2e(tmp_path, monkeypatch):
+    """T5/P4 端到端:teammate bob 建依赖图 A→B、完成 A、B 自动解锁、claim B。
+
+    bob 经完整 executor 路径发 4 个 tool call:TaskCreate(A) → TaskCreate(B,blocked_by=A)
+    → TaskUpdate(A completed,B 自动解锁 pending) → TaskClaim(B)。最终 #2 = in_progress +
+    assignee=bob(依赖图 + 自动解锁 + claim 尊重依赖全链路)。
+    """
+    from birdcode.agents import runner
+    from birdcode.agents.teammate import TeamManager
+    from birdcode.tools.registry import ToolRegistry
+    from birdcode.tools.task_tools import TaskClaimTool, TaskCreateTool, TaskUpdateTool
+
+    team = TeamManager()
+    parent_reg = ToolRegistry()  # bob 经 build_child_registry 继承
+    parent_reg.register(TaskCreateTool(team))
+    parent_reg.register(TaskUpdateTool(team))
+    parent_reg.register(TaskClaimTool(team))
+
+    calls = [
+        ("TaskCreate", {"title": "A"}),
+        ("TaskCreate", {"title": "B", "blocked_by": ["1"]}),
+        ("TaskUpdate", {"id": "1", "status": "completed"}),
+        ("TaskClaim", {"id": "2"}),
+    ]
+
+    def _builder(profile, app, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _ToolCallsProvider(profile, calls)
+
+    monkeypatch.setattr(runner, "build_provider", _builder)
+
+    mailbox: asyncio.Queue = asyncio.Queue()
+    mailbox.put_nowait(_TEAMMATE_SHUTDOWN)
+    r = SubagentRunner(
+        defn=_defn(), prompt="bob 起步", description="d", tool_use_id="call_p4e2e",
+        model_override="", spawn_depth=1, is_async=True,
+        parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+        parent_registry=parent_reg, parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
+        project_root=tmp_path, root=tmp_path, mailbox=mailbox,
+    )
+    handle = await team.spawn("bob", r)
+    await handle.join()
+
+    t1 = team.task_board.get("1")
+    t2 = team.task_board.get("2")
+    assert t1.status == "completed"
+    # B:被 claim 成功(依赖解锁后),状态 in_progress + 落 bob 名下
+    assert t2.status == "in_progress" and t2.assignee == "bob"
+
+
+async def test_team_manager_cancel_all(tmp_path, monkeypatch):
+    """S1/#7:TeamManager 存 handle;cancel_all 批量硬取消所有 teammate。"""
+    from birdcode.agents import runner
+    from birdcode.agents.teammate import TeamManager
+
+    def _builder(profile, app, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _HistoryRecordingProvider(profile=profile)
+
+    monkeypatch.setattr(runner, "build_provider", _builder)
+
+    team = TeamManager()
+    handles, metas = [], []
+    for i, name in enumerate(["bob", "carol"]):
+        mb: asyncio.Queue = asyncio.Queue()  # 空 → park
+        r = SubagentRunner(
+            defn=_defn(), prompt=name, description="d", tool_use_id=f"call_ca{i}",
+            model_override="", spawn_depth=1, is_async=True,
+            parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+            parent_registry=None, parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
+            project_root=tmp_path, root=tmp_path, mailbox=mb,
+        )
+        metas.append(subagent_meta_path(tmp_path, "s1", tmp_path, r.agent_id))
+        handles.append(await team.spawn(name, r))
+
+    for mp in metas:
+        assert await _wait_status(mp, "idle"), "teammate 未 park"
+
+    team.cancel_all()
+    for h in handles:
+        with pytest.raises(asyncio.CancelledError):
+            await h.join()
+
+
+async def test_team_manager_shutdown_all(tmp_path, monkeypatch):
+    """S1/#7:shutdown_all 批量干净终止(SHUTDOWN→completed,不抛)。"""
+    from birdcode.agents import runner
+    from birdcode.agents.teammate import TeamManager
+
+    def _builder(profile, app, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _HistoryRecordingProvider(profile=profile)
+
+    monkeypatch.setattr(runner, "build_provider", _builder)
+
+    team = TeamManager()
+    handles, metas = [], []
+    for i, name in enumerate(["dan", "eve"]):
+        mb: asyncio.Queue = asyncio.Queue()
+        r = SubagentRunner(
+            defn=_defn(), prompt=name, description="d", tool_use_id=f"call_sd{i}",
+            model_override="", spawn_depth=1, is_async=True,
+            parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+            parent_registry=None, parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
+            project_root=tmp_path, root=tmp_path, mailbox=mb,
+        )
+        metas.append(subagent_meta_path(tmp_path, "s1", tmp_path, r.agent_id))
+        handles.append(await team.spawn(name, r))
+
+    for mp in metas:
+        assert await _wait_status(mp, "idle")
+
+    team.shutdown_all()
+    for h in handles:
+        await h.join()  # SHUTDOWN 干净终止,不抛
+    for mp in metas:
+        m = read_subagent_meta(mp)
+        assert m is not None and m.status == "completed"
+
+
+async def test_teammate_passes_context_manager_one_shot_none(tmp_path, monkeypatch):
+    """S3/#1:teammate(mailbox)传 ContextManager(防 history 跨轮累积爆);一次性(mailbox None)仍 None。
+
+    teammate 长驻 history 跨轮累积 → O(n²) + ContextOverflow;接 ContextManager(store=None 纯
+    内存)后 maybe_compact 压缩 + react 截断 overflow。一次性只一轮不爆,仍 None。
+    """
+    from birdcode.agents import runner
+
+    captured: list = []
+    real_run = runner.run_agent_loop
+
+    async def _spy(**kw):
+        captured.append(kw.get("context"))
+        return await real_run(**kw)
+
+    monkeypatch.setattr(runner, "run_agent_loop", _spy)
+
+    def _builder(profile, app, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _HistoryRecordingProvider(profile=profile)
+
+    monkeypatch.setattr(runner, "build_provider", _builder)
+
+    # teammate(mailbox 非空)→ context 非 None
+    mb: asyncio.Queue = asyncio.Queue()
+    mb.put_nowait(_TEAMMATE_SHUTDOWN)
+    r = SubagentRunner(
+        defn=_defn(), prompt="t", description="d", tool_use_id="call_s3t",
+        model_override="", spawn_depth=1, is_async=True,
+        parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+        parent_registry=None, parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
+        project_root=tmp_path, root=tmp_path, mailbox=mb,
+    )
+    await r.run()
+    assert captured, "teammate 应至少调一次 run_agent_loop"
+    assert captured[0] is not None, "teammate 应传 ContextManager(非 None)"
+
+    # 一次性(mailbox None)→ context None
+    captured.clear()
+    r2 = SubagentRunner(
+        defn=_defn(), prompt="o", description="d", tool_use_id="call_s3o",
+        model_override="", spawn_depth=1, is_async=False,
+        parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+        parent_registry=None, parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
+        project_root=tmp_path, root=tmp_path,
+    )
+    await r2.run()
+    assert captured[0] is None, "一次性 subagent 应传 context=None(只一轮不爆)"
+
+
+async def test_team_manager_reset(tmp_path, monkeypatch):
+    """S5:reset() cancel 所有 teammate + 清 registry/board(/clear 用,team_mgr 引用不变)。"""
+    from birdcode.agents import runner
+    from birdcode.agents.teammate import TeamManager
+
+    def _builder(profile, app, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _HistoryRecordingProvider(profile=profile)
+
+    monkeypatch.setattr(runner, "build_provider", _builder)
+
+    team = TeamManager()
+    handles = []
+    for i, name in enumerate(["bob", "carol"]):
+        mb: asyncio.Queue = asyncio.Queue()
+        r = SubagentRunner(
+            defn=_defn(), prompt=name, description="d", tool_use_id=f"call_rs{i}",
+            model_override="", spawn_depth=1, is_async=True,
+            parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+            parent_registry=None, parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
+            project_root=tmp_path, root=tmp_path, mailbox=mb,
+        )
+        handles.append(await team.spawn(name, r))
+    team.task_board.create(title="x")
+    assert team.names() == ["bob", "carol"] and team._handles
+
+    team.reset()
+
+    assert team.names() == [] and not team._handles
+    assert team.task_board.list() == []
+    for h in handles:
+        with pytest.raises(asyncio.CancelledError):
+            await h.join()  # cancel 异步传播,join 等其终止
+
+
+async def test_spawn_teammate_tool(tmp_path, monkeypatch):
+    """S6:SpawnTeammateTool → 构造 mailbox runner + team_mgr.spawn;起 + 注册 + 重名拒。"""
+    from birdcode.agents import runner
+    from birdcode.agents.teammate import TeamManager
+    from birdcode.tools.spawn_teammate_tool import SpawnTeammateTool
+
+    def _builder(profile, app, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _HistoryRecordingProvider(profile=profile)
+
+    monkeypatch.setattr(runner, "build_provider", _builder)
+
+    team = TeamManager()
+    tool = SpawnTeammateTool(
+        team_mgr=team, defn=_defn(), cfg=_cfg(), app=None, ctx=_ctx(),
+        project_root=tmp_path,
+        parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+        parent_registry=None, parent_gate=None, progress_cb=None,
+    )
+    out = await tool.execute(name="bob", prompt="做 X")
+    assert "bob" in out and "bob" in team.names()
+
+    # 重名 → 拒
+    out2 = await tool.execute(name="bob", prompt="再次")
+    assert "已存在" in out2
+
+    # 清理:shutdown_all + 等 teammate 终止(免悬挂)
+    team.shutdown_all()
+    for h in list(team._handles.values()):
+        await h.join()
+
+
+async def test_team_manager_teammates_and_handle(tmp_path, monkeypatch):
+    """S7:teammates()/handle() 公开接口;/agents UI 观察/打断/发消息用。"""
+    from birdcode.agents import runner
+    from birdcode.agents.teammate import TeamManager
+
+    def _builder(profile, app, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _HistoryRecordingProvider(profile=profile)
+
+    monkeypatch.setattr(runner, "build_provider", _builder)
+
+    team = TeamManager()
+    mb: asyncio.Queue = asyncio.Queue()
+    r = SubagentRunner(
+        defn=_defn(), prompt="bob", description="d", tool_use_id="call_th1",
+        model_override="", spawn_depth=1, is_async=True,
+        parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+        parent_registry=None, parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
+        project_root=tmp_path, root=tmp_path, mailbox=mb,
+    )
+    h = await team.spawn("bob", r)
+
+    ts = team.teammates()
+    assert len(ts) == 1 and ts[0][0] == "bob" and ts[0][1] is h
+    assert team.handle("bob") is h
+    assert team.handle("nobody") is None
+
+    team.shutdown_all()
+    await h.join()
+
+
+async def test_handle_send_to_done_raises_shutdown_idempotent(tmp_path, monkeypatch):
+    """#15:已结束 teammate send→raise(不静默丢);shutdown 幂等(不抛)。"""
+    from birdcode.agents import runner
+    from birdcode.agents.teammate import TeamManager
+
+    def _builder(profile, app, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _HistoryRecordingProvider(profile=profile)
+
+    monkeypatch.setattr(runner, "build_provider", _builder)
+
+    team = TeamManager()
+    mb: asyncio.Queue = asyncio.Queue()
+    mb.put_nowait(_TEAMMATE_SHUTDOWN)  # 跑完首轮 → SHUTDOWN → completed
+    r = SubagentRunner(
+        defn=_defn(), prompt="bob", description="d", tool_use_id="call_sd_done",
+        model_override="", spawn_depth=1, is_async=True,
+        parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+        parent_registry=None, parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
+        project_root=tmp_path, root=tmp_path, mailbox=mb,
+    )
+    h = await team.spawn("bob", r)
+    await h.join()
+    assert h.done()
+
+    with pytest.raises(RuntimeError, match="已结束"):
+        await h.send("post-mortem")
+    h.shutdown()  # 幂等 no-op,不抛
+
+
+async def test_teammate_park_stops_progress_tick(tmp_path, monkeypatch):
+    """#9:teammate park 时 progress_tick 停(park 后 progress_cb 不再被调)。
+
+    未修:tick 创建一次、仅 finally cancel → park(idle)时仍每秒报 phase=running + elapsed 增,
+    与 meta=idle 矛盾、误导进度卡。修后:park cancel tick,wake recreate。
+    """
+    from birdcode.agents import runner
+    from birdcode.agents.report import SubagentProgress
+
+    recorded: list[SubagentProgress] = []
+
+    async def _cb(p: SubagentProgress) -> None:
+        recorded.append(p)
+
+    def _builder(profile, app, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _HistoryRecordingProvider(profile=profile)
+
+    monkeypatch.setattr(runner, "build_provider", _builder)
+
+    mailbox: asyncio.Queue = asyncio.Queue()  # 空 → park
+    r = SubagentRunner(
+        defn=_defn(), prompt="bob", description="d", tool_use_id="call_tick",
+        model_override="", spawn_depth=1, is_async=True,
+        parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+        parent_registry=None, parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
+        project_root=tmp_path, root=tmp_path, mailbox=mailbox, progress_cb=_cb,
+    )
+    task = asyncio.create_task(r.run())
+    try:
+        await asyncio.sleep(1.2)  # 首轮(<0.1s)→park;1.2s 让 tick 跑一次(若没停)
+        n_at_park = len(recorded)
+        await asyncio.sleep(1.3)  # 再等,tick 若跑会再调
+        assert len(recorded) == n_at_park, "park 后 tick 应停,progress_cb 不再被调"
+    finally:
+        mailbox.put_nowait(_TEAMMATE_SHUTDOWN)
+        await task
+
+
+async def test_teammate_done_notifies_lead(tmp_path, monkeypatch):
+    """#4:teammate 完成(非 cancel)→ 自动通知 lead(report 摘要注入 lead session)。
+
+    lead 经 done-callback 收到 [teammate 完成] 消息,自动知晓 teammate 干完(cancel 不通知)。
+    """
+    from birdcode.agents import runner
+    from birdcode.agents.teammate import TeamManager
+
+    def _builder(profile, app, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _HistoryRecordingProvider(profile=profile)
+
+    monkeypatch.setattr(runner, "build_provider", _builder)
+
+    team = TeamManager()
+    lead_received: list = []
+    team.register("lead", lambda m: lead_received.append(m))
+
+    mb: asyncio.Queue = asyncio.Queue()
+    mb.put_nowait(_TEAMMATE_SHUTDOWN)  # 跑首轮 → park → SHUTDOWN → done
+    r = SubagentRunner(
+        defn=_defn(), prompt="bob", description="d", tool_use_id="call_notify",
+        model_override="", spawn_depth=1, is_async=True,
+        parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+        parent_registry=None, parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
+        project_root=tmp_path, root=tmp_path, mailbox=mb,
+    )
+    h = await team.spawn("bob", r)
+    await h.join()
+    for _ in range(100):  # done-callback 异步触发
+        if lead_received:
+            break
+        await asyncio.sleep(0.01)
+    assert lead_received, "lead 应收到 teammate 完成通知"
+    msg = lead_received[0]
+    assert msg.sender == "bob" and msg.to == "lead"
+    assert "完成" in msg.content
+
+
+async def test_teammate_duration_excludes_park(tmp_path, monkeypatch):
+    """#10:teammate duration_ms 不含 idle park(只计活跃段)。
+
+    park 1s 期间不计入;duration 应远小于 park 时间(只首轮+轮2活跃,各<100ms)。
+    """
+    from birdcode.agents import runner
+
+    def _builder(profile, app, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _HistoryRecordingProvider(profile=profile)
+
+    monkeypatch.setattr(runner, "build_provider", _builder)
+
+    mailbox: asyncio.Queue = asyncio.Queue()  # 空 → park
+    r = SubagentRunner(
+        defn=_defn(), prompt="bob", description="d", tool_use_id="call_dur",
+        model_override="", spawn_depth=1, is_async=True,
+        parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+        parent_registry=None, parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
+        project_root=tmp_path, root=tmp_path, mailbox=mailbox,
+    )
+    meta_path = subagent_meta_path(tmp_path, "s1", tmp_path, r.agent_id)
+    task = asyncio.create_task(r.run())
+    try:
+        for _ in range(100):  # 等首轮跑完 → park(idle)
+            m = read_subagent_meta(meta_path)
+            if m is not None and m.status == "idle":
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(1.0)  # park 1s(duration 若含 park 会 >1000ms)
+        mailbox.put_nowait(MailboxMessage(sender="lead", to="bob", content="wake"))
+        mailbox.put_nowait(_TEAMMATE_SHUTDOWN)
+        report = await task
+        # duration 应不含 park 1s → < 900ms(首轮+轮2活跃各<100ms)
+        assert report.duration_ms < 900, f"duration 含 park? {report.duration_ms}ms"
+    finally:
+        if not task.done():
+            mailbox.put_nowait(_TEAMMATE_SHUTDOWN)
+            await task

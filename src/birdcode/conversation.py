@@ -68,12 +68,26 @@ class _WakeInput:
 _WAKE = _WakeInput()
 
 
+class _PeerInput:
+    """teammate→lead 的 peer 消息(入队项):包文本,与用户文本(str)区分。
+
+    不计入 _user_count(状态栏「排队消息」只含用户文本;peer 消息不虚增)。
+    _drain 用 isinstance(_PeerInput) 分派到 _process(unwrap .text)。
+    """
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
 class MessageQueue:
-    """FIFO type-ahead/wake 队列。项为用户文本(str)或唤醒标记(_WakeInput)。"""
+    """FIFO type-ahead/wake/peer 队列。
+
+    项为用户文本(str)/唤醒标记(_WakeInput)/peer 消息(_PeerInput)。
+    """
 
     def __init__(self) -> None:
-        self._q: asyncio.Queue[str | _WakeInput] = asyncio.Queue()
-        # 状态栏「排队消息」计数只含用户文本(str);系统唤醒标记(_WakeInput)不计入,否则
+        self._q: asyncio.Queue[str | _WakeInput | _PeerInput] = asyncio.Queue()
+        # 状态栏「排队消息」计数只含用户文本(str);_WakeInput/_PeerInput 不计入,否则
         # 忙时若干异步子 agent 完成会虚增 ⌛N(误显为用户在排队输入)。
         self._user_count = 0
 
@@ -174,7 +188,7 @@ class TurnController:
         user/notify_wake/异步子 agent 通知流程全不变。
         """
         text = f"[来自 {msg.sender}]: {msg.content}"
-        self._queue.enqueue(text)
+        self._queue.enqueue(_PeerInput(text))  # peer 消息不计 _user_count(状态栏不虚增)
         if not self.busy:
             self.busy = True
             task = asyncio.create_task(self._drain())
@@ -304,6 +318,8 @@ class TurnController:
                 await self._on_status()
                 if isinstance(item, _WakeInput):
                     await self._process_wake()
+                elif isinstance(item, _PeerInput):
+                    await self._process(item.text)
                 else:
                     await self._process(item)
         finally:

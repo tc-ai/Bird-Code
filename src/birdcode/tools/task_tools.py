@@ -20,46 +20,73 @@ if TYPE_CHECKING:
 class TaskCreateInput(BaseModel):
     title: str = Field(..., description="任务标题")
     assignee: str | None = Field(None, description="指派给某 teammate(可选;push 模式由 lead 设)")
+    blocked_by: list[str] = Field(
+        default_factory=list,
+        description="依赖的 task id 列表;这些全部完成后本任务才从 blocked 解锁为 pending",
+    )
 
 
 class TaskCreateTool(Tool):
     name = "TaskCreate"
-    description = "在共享看板上建一个任务(flat,无依赖)。可选指派给 teammate。"
+    description = (
+        "在共享看板上建一个任务。可选指派给 teammate(push)、声明依赖 blocked_by"
+        "(依赖完成后才解锁可抢)。"
+    )
     parameters = TaskCreateInput
     kind = "write"
     parallel_safe = False
+    gate_exempt = True  # 纯内存(board dict),无 FS/命令副作用
+    team_scoped = True  # 仅 teammate(mailbox)继承;一次性 subagent 排除
 
     def __init__(self, team: TeamManager) -> None:
         super().__init__()
         self.team = team
 
-    async def execute(self, *, title: str, assignee: str | None = None) -> str:
+    async def execute(
+        self, *, title: str, assignee: str | None = None,
+        blocked_by: list[str] | None = None,
+    ) -> str:
         t = self.team.task_board.create(
-            title=title, assignee=assignee, created_by=_AGENT_NAME.get()
+            title=title, assignee=assignee, created_by=_AGENT_NAME.get(),
+            blocked_by=blocked_by or [],
         )
         suffix = f"(→{assignee})" if assignee else ""
-        return f"已建任务 #{t.id}: {t.title}{suffix}"
+        dep = f"(依赖:{','.join(t.blocked_by)})" if t.blocked_by else ""
+        return f"已建任务 #{t.id}: {t.title}{suffix}{dep}"
+
+
+class TaskListInput(BaseModel):
+    status: str | None = Field(
+        None, description="按状态过滤:pending|in_progress|completed。None=全部(pull 时常用 pending)"
+    )
 
 
 class TaskListTool(Tool):
     name = "TaskList"
-    description = "列出看板上所有任务(id/status/title/assignee)。"
-    parameters = BaseModel  # 无参
+    description = (
+        "列出看板上任务(id/status/title/assignee)。可选按 status 过滤"
+        "(pull 时常用 pending 看可抢的)。"
+    )
+    parameters = TaskListInput
     kind = "read"
     parallel_safe = True
+    team_scoped = True  # 仅 teammate(mailbox)继承;一次性 subagent 排除
 
     def __init__(self, team: TeamManager) -> None:
         super().__init__()
         self.team = team
 
-    async def execute(self) -> str:  # noqa: ARG002 - executor 传 **{},签名无 kw
+    async def execute(self, *, status: str | None = None) -> str:
         tasks = self.team.task_board.list()
+        if status is not None:
+            tasks = [t for t in tasks if t.status == status]
         if not tasks:
             return "(无任务)"
         lines = []
         for t in tasks:
             a = f" →{t.assignee}" if t.assignee else ""
-            lines.append(f"#{t.id} [{t.status}] {t.title}{a}")
+            dep = f" 依赖:{','.join(t.blocked_by)}" if t.blocked_by else ""
+            lines.append(f"#{t.id} [{t.status}] {t.title}{a}{dep}")
         return "\n".join(lines)
 
 
@@ -75,6 +102,8 @@ class TaskUpdateTool(Tool):
     parameters = TaskUpdateInput
     kind = "write"
     parallel_safe = False
+    gate_exempt = True  # 纯内存(board dict),无 FS/命令副作用
+    team_scoped = True  # 仅 teammate(mailbox)继承;一次性 subagent 排除
 
     def __init__(self, team: TeamManager) -> None:
         super().__init__()
@@ -95,3 +124,44 @@ class TaskUpdateTool(Tool):
         if not parts:
             return f"任务 #{id} 未变更(未指定 status/assignee)"
         return f"已更新 #{id}: " + ", ".join(parts)
+
+
+class TaskClaimInput(BaseModel):
+    id: str = Field(..., description="要领取的任务 id(须为 pending)")
+
+
+class TaskClaimTool(Tool):
+    """领取(claim)一个 pending 任务——pull 模式核心,teammate 自抢。
+
+    原子地 pending→in_progress + 落自己名下(经 TaskBoard.claim 同步 CAS)。替代裸
+    TaskUpdate(status=in_progress) 的非原子路径(后者双人抢同一任务 last-writer-wins)。
+    assignee 取 _AGENT_NAME(teammate 名);同 SendMessage/TaskCreate 模式。
+    """
+
+    name = "TaskClaim"
+    description = (
+        "领取(claim)一个 pending 任务:原子地标为 in_progress 并落到自己名下。"
+        "pull 模式——自抢未指派(或指派给自己)的 pending 任务。已被抢/已完成/指派他人则失败。"
+    )
+    parameters = TaskClaimInput
+    kind = "write"
+    parallel_safe = False
+    gate_exempt = True  # 纯内存(board dict CAS),无 FS/命令副作用
+    team_scoped = True  # 仅 teammate(mailbox)继承;一次性 subagent 排除
+
+    def __init__(self, team: TeamManager) -> None:
+        super().__init__()
+        self.team = team
+
+    async def execute(self, *, id: str) -> str:
+        agent = _AGENT_NAME.get()
+        t = self.team.task_board.claim(id, agent)
+        if t is not None:
+            return f"已领取 #{id}: {t.title}(status=in_progress, assignee={agent})"
+        # claim 失败:回原因让 LLM 自决(换任务 / 等待 / 找指派者)
+        existing = self.team.task_board.get(id)
+        if existing is None:
+            return f"领取失败 #{id}: 任务不存在"
+        if existing.status != "pending":
+            return f"领取失败 #{id}: 当前 status={existing.status}(非 pending,无法领取)"
+        return f"领取失败 #{id}: 已指派给 {existing.assignee}(非你,不可抢)"

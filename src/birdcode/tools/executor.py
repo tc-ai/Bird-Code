@@ -135,7 +135,8 @@ class ToolExecutor:
 
         # 所有工具执行前查权限(校验通过后才查,避免无谓弹窗)。
         # 读类在 UiPermissionGate 内走 read-default 无条件 allow,不触 HITL;故不会弹窗。
-        if self._permission is not None:
+        # gate_exempt 工具(team 协调工具,纯内存无 FS/命令副作用)跳过 gate。
+        if self._permission is not None and not getattr(tool, "gate_exempt", False):
             verdict = await self._permission.check(tool, args_dict)
             if verdict.action != "allow":
                 # 把 deny 的 reason 回传模型(如 L1 黑名单 hint / L2 越界 / plan 模式说明)。

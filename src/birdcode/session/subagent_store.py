@@ -8,9 +8,10 @@
 """
 from __future__ import annotations
 
+import json
 import uuid as _uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from birdcode.conversation import Message
 from birdcode.session import codec, paths
@@ -22,6 +23,7 @@ from birdcode.utils.worktree import worktree_store_name
 
 if TYPE_CHECKING:
     from birdcode.agent.provider import TokenUsage
+    from birdcode.conversation import Turn
 
 log = get_logger("birdcode.session.subagent")
 
@@ -84,3 +86,23 @@ class SubagentStore:
             self._fh.close()
         except Exception:
             pass
+
+
+def read_subagent_transcript(path: Path) -> list[Turn]:
+    """读 sidechain jsonl → list[Turn](完整对话,给 /agents UI 看 teammate transcript)。
+
+    镜像 app._read_sidechain_final_text 的读循环,但返完整 codec.decode_lines(非只末条文本)。
+    坏行/缺文件 → 空或跳过(韧性,不抛)。decode_lines 不过滤 isSidechain,直接适用 sidechain 行。
+    """
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return codec.decode_lines(rows)

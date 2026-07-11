@@ -34,11 +34,12 @@ Thumbs.db
 # Logs / runtime
 *.log
 
-# BirdCode 本地状态(勿提交:权限规则 / 运行时 worktree / 含密钥的配置)
+# BirdCode 本地状态(勿提交:权限规则 / 运行时 worktree / 含密钥的配置 / 用户级 skill 等运行时数据)
 .birdcode/permissions.local.yaml
 .birdcode/permissions.yaml
 .birdcode/worktrees/
 .birdcode/config.yaml
+.birdcode/skill/
 
 # Plugin / tool local state
 .superpowers/

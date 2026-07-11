@@ -12,7 +12,7 @@ Bird-Code 是一个运行在终端里的 AI 编码 agent：你与 LLM 对话，L
 - **分层权限** — L1–L5（黑名单 → 沙箱路径 → 规则 → 模式 → 人在回路），四种模式 `default` / `accept-edits` / `plan` / `bypass`
 - **终端图形界面** — 基于 Textual 的 TUI，流式 Markdown、工具行、权限提示、固定底部输入框（CJK IME 友好）
 - **子 Agent** — 内置 Explore（只读探索）、Plan（架构规划）、General-purpose（通用开发），支持 `worktree` 隔离（子 agent 在独立 git worktree 工作，产物清单随报告返回）
-- **技能系统** — `.birdcode/skill/` 下的 markdown 技能（透明注入），开箱含 brainstorming / writing-plans / executing-plans / test-driven-development
+- **技能系统** — `.birdcode/skill/` 下的 markdown 技能（透明注入），支持 inline 注入当前对话与 fork 子 agent 两种模式
 - **会话管理** — jsonl 持久化，中断恢复、跨会话 replay
 - **上下文压缩** — 逼近窗口时自动摘要压缩，413 硬截断兜底
 - **记忆系统** — 自动提取用户 / 项目记忆，跨会话注入
@@ -152,7 +152,7 @@ $ARGUMENTS
 
 `name` + `description` 必填;正文是任务模板,`$ARGUMENTS` 会被调用参数替换(无占位符时参数追加到正文末尾)。skill 是"透明"的——inline 模式正文直接注入当前对话,fork 模式起独立子 agent。
 
-> 内置 skill 见 `.birdcode/skill/`(brainstorming / writing-plans / executing-plans / test-driven-development),可作模板参考。
+> skill 是项目级 / 用户级运行时配置(随用随加),默认不随仓库分发;按上面格式在 `.birdcode/skill/` 下自建即可。
 
 ### 覆盖与冲突
 
@@ -202,7 +202,3 @@ src/birdcode/
 ## License
 
 MIT — 见 [LICENSE](LICENSE)。
-
-## 致谢
-
-`.birdcode/skill/` 下的工作流技能（brainstorming / writing-plans / executing-plans / test-driven-development）翻译自 [superpowers](https://github.com/obra/superpowers)（Copyright © 2025 Jesse Vincent, MIT License），详见 [.birdcode/skill/LICENSE-thirdparty.md](.birdcode/skill/LICENSE-thirdparty.md)。

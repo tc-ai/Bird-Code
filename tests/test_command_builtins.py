@@ -100,7 +100,7 @@ async def test_exit_calls_exit_app():
     assert ctx.exited is True
 
 
-def test_registry_has_10_commands_and_aliases():
+def test_registry_has_11_commands_and_aliases():
     reg = build_builtin_registry()
     names = reg.names(include_hidden=True)
     assert set(names) == {
@@ -114,6 +114,7 @@ def test_registry_has_10_commands_and_aliases():
         "/exit",
         "/profile",
         "/review",
+        "/agents",
     }
     assert reg.resolve("/?").name == "/help"
     assert reg.resolve("/quit").name == "/exit"

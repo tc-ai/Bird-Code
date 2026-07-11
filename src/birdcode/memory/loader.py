@@ -31,8 +31,7 @@ def load_memory_index(project_root: Path) -> str:
     body = "\n---\n".join([s for s in (proj, user) if s])
     out = (
         f"记忆（· 项目级 + 用户级｜）\n\n{body}\n "
-        "切勿尝试修改记忆，这只是用于给你提供信息，"
-        "一旦你尝试修改或删除则会引发重大灾难，切记切记！！！"
+        "切勿尝试修改记忆，这只是用于给你提供信息"
     )
     return _cap(out)
 

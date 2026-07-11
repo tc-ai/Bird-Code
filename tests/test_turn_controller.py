@@ -429,3 +429,27 @@ async def test_receive_drain_runs_as_lead_not_teammate():
             break
         await asyncio.sleep(0.01)
     assert captured == ["lead"], "lead 轮的 _AGENT_NAME 应钉为 lead,而非投递方 teammate"
+
+
+@pytest.mark.asyncio
+async def test_receive_does_not_inflate_user_count():
+    """#8:receive(peer 消息)用 _PeerInput,不计 _user_count(对比 user submit 计)。
+
+    状态栏 queue_size 只含用户文本;teammate→lead 消息不虚增(忙时若干 teammate 发消息
+    不应误显为用户在排队输入)。
+    """
+    gate = asyncio.Event()
+    ctrl = TurnController(GatedProvider(gate), on_event=_noop_event, on_status=_noop_status)
+    task = asyncio.create_task(ctrl.submit("user1"))  # 占位 busy
+    await asyncio.sleep(0)
+    assert ctrl.busy
+    assert ctrl.queue_size == 0
+
+    ctrl.receive(MailboxMessage(sender="bob", to="lead", content="hi"))
+    assert ctrl.queue_size == 0  # peer 消息不计
+
+    await ctrl.submit("user2")  # busy → 入队 str
+    assert ctrl.queue_size == 1  # user 文本计
+
+    gate.set()
+    await task
