@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv: uv.lock IS committed; only the cache is ignored
+
+# Tool caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / runtime
+*.log
+
+# BirdCode 本地状态(勿提交:权限规则 / 运行时 worktree / 含密钥的配置)
+.birdcode/permissions.local.yaml
+.birdcode/permissions.yaml
+.birdcode/worktrees/
+.birdcode/config.yaml
+
+# Plugin / tool local state
+.superpowers/
+
+# Windows 保留设备名误落盘的空文件
+/nul
