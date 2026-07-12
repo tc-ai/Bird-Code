@@ -78,13 +78,22 @@ class SpawnTeammateTool(Tool):
         self.progress_cb = progress_cb
 
     async def execute(self, *, name: str, prompt: str) -> str:
+        # #4:入口归一 + 大小写不敏感保留名检查。name 原是裸 Field,LLM 传 'Lead'(大小写)或
+        # ' bob '(首尾空白)能滑过保留名/已存在检查:'Lead' 不在小写 _RESERVED_NAMES 也不在
+        # team.names()(持小写 'lead')→ spawn 出来与系统 lead recipient 大小写撞名,SendMessage/
+        # /agents 的精确匹配寻址被搅乱;' bob ' 则原样灌进 _AGENT_NAME 污染后续精确匹配。入口先
+        # strip(空串拒),保留名按 lower() 比对,已存在按 strip 后精确比对,下游一律用 strip 后的名。
+        name = name.strip()
+        if not name:
+            return "错误:teammate 名不能为空(纯空白),请换名。"
+        key = name.lower()
         # 保留名先于「已存在」拒(F11):lead 是系统 recipient(app 预注册,team_mgr 起步即含),
         # 撞它会报「已存在」却从未 spawn 过该名 teammate;stop/view 是 /agents 子命令冲突。
-        if name in _RESERVED_NAMES:
-            if name == "lead":
+        if key in _RESERVED_NAMES:
+            if key == "lead":
                 return (
                     "错误:'lead' 是主 session 的保留名(teammate→lead 通道预注册占用),"
-                    "不能用作 teammate 名。请换名。"
+                    "不能用作 teammate 名(大小写不敏感)。请换名。"
                 )
             return (
                 f"错误:teammate 名 '{name}' 与 /agents 子命令冲突(stop/view 保留),"

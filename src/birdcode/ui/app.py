@@ -1235,45 +1235,58 @@ class BirdApp(App[None]):
         退出时 startup task 可能仍在跑:先 cancel+await 它(各 _server_lifecycle 的 finally 回滚
         自己的 transport),再 shutdown——避免与 shutdown 并发改 _sessions/_server_tasks。
         """
-        # 0) 取消在跑的 teammate / 异步子 agent:退出时别让它们悬挂(meta 卡 running/idle、
-        # 侧链写一半)。cancel 经 runner 的 CancelledError 路径把 meta 落 cancelled + close store。
-        # 与 action_interrupt 同两行。
-        if self._team_mgr is not None:
-            self._team_mgr.cancel_all()
-        if self._subagent_mgr is not None:
-            self._subagent_mgr.cancel_all()
-        # F5:await 两者 task 终止 → runner.run() finally 内的 shielded worktree cleanup
-        # (git unlock/remove/branch-d)在 live loop 上跑完。不 await 则关 loop 时砍断 cleanup
-        # → 每次裸退出留一批 git-locked worktree(teammate/async-subagent 的 agent_id 随机,
-        # 跨会话不复用,create_worktree 的快速恢复救不了)。join_all 带总超时,git 卡时不阻塞退出。
-        if self._team_mgr is not None:
-            await self._team_mgr.join_all()
-        if self._subagent_mgr is not None:
-            await self._subagent_mgr.join_all()
-        # 1) 收尾后台 startup task。无条件 await(即使已完成):检索其异常,防 asyncio
-        # "Task exception was never retrieved" 警告 + 静默丢弃(startup 尾巴的 BaseException
-        # 如 SystemExit 逃过 _start_mcp_background 的 except Exception 时)。cancel 仅对未完成者。
-        task = self._mcp_startup_task
-        if task is not None:
-            if not task.done():
-                task.cancel()
-            try:
-                await task
-            except BaseException:  # noqa: BLE001 - CancelledError/startup 异常都吞,继续 shutdown
-                pass
-        # 2) 关闭已托管的 sessions/transports
-        mgr = self._mcp_manager
-        if mgr is not None:
-            try:
-                await mgr.shutdown()
-            except Exception:
-                log.debug("MCP shutdown failed", exc_info=True)
-        # 3) 关闭会话 store(刷 jsonl 文件句柄;无 store 时 no-op)
-        if self._store is not None:
-            try:
-                self._store.close()
-            except Exception:
-                log.debug("store close failed", exc_info=True)
+        # 0) controller 先进入退出态(#1):抑制后续 notify_wake/receive 起新后台 drain +
+        #    取消已起的 orphan drain。必须先于 cancel/join——退出收尾链(cancel_all→join_all→
+        #    _supervise→_inject→notify_wake)会在退出期触发 notify_wake,不抑制度就起一个 on_unmount
+        #    既不 await 也不 cancel 的 orphan drain,在后续 MCP/store await 期跑 run_agent_loop。
+        if self._controller is not None:
+            self._controller.begin_shutdown()
+        try:
+            # 1) 取消在跑的 teammate / 异步子 agent:退出时别让它们悬挂(meta 卡 running/idle、
+            #    侧链写一半)。cancel 经 runner CancelledError 路径落 meta=cancelled + close store。
+            if self._team_mgr is not None:
+                self._team_mgr.cancel_all()
+            if self._subagent_mgr is not None:
+                self._subagent_mgr.cancel_all()
+            # F5:await 两者 task 终止 → runner.run() finally 内的 shielded worktree cleanup
+            # (git unlock/remove/branch-d)在 live loop 上跑完。不 await 则关 loop 时砍断 cleanup
+            # → 每次裸退出留一批 git-locked worktree(teammate/async-subagent 的 agent_id 随机,
+            # 跨会话不复用,create_worktree 的快速恢复救不了)。#9:两者并发 gather(各自内部 5s
+            # 超时),避免串行 5s+5s≈10s 退出卡顿;return_exceptions 兜底,join_all 自身不抛。
+            joins: list = []
+            if self._team_mgr is not None:
+                joins.append(self._team_mgr.join_all())
+            if self._subagent_mgr is not None:
+                joins.append(self._subagent_mgr.join_all())
+            if joins:
+                await asyncio.gather(*joins, return_exceptions=True)
+            # 2) 收尾后台 startup task。无条件 await(即使已完成):检索其异常,防 asyncio
+            # "Task exception was never retrieved" 警告 + 静默丢弃(startup 尾巴的 BaseException
+            # 如 SystemExit 逃过 _start_mcp_background 的 except Exception 时)。cancel 仅未完成者。
+            task = self._mcp_startup_task
+            if task is not None:
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except BaseException:  # noqa: BLE001 - CancelledError/startup 异常都吞,继续 shutdown
+                    pass
+            # 3) 关闭已托管的 sessions/transports
+            mgr = self._mcp_manager
+            if mgr is not None:
+                try:
+                    await mgr.shutdown()
+                except Exception:
+                    log.debug("MCP shutdown failed", exc_info=True)
+        finally:
+            # 4) 关闭会话 store(刷 jsonl 文件句柄;无 store 时 no-op)。#2:放 finally——退出
+            #    路径(被 cancel / 上游异常)也保证关句柄,不因 join/mcp 期被打断而跳过。
+            #    (数据本就每行 append 即 flush,这里只关句柄;不关只留句柄泄漏,不丢数据。)
+            if self._store is not None:
+                try:
+                    self._store.close()
+                except Exception:
+                    log.debug("store close failed", exc_info=True)
 
     def action_cycle_mode(self) -> None:
         """shift+tab 循环切档:plan→default→accept-edits→bypass→plan。

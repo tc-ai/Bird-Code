@@ -182,6 +182,23 @@ def test_create_and_update_normalize_whitespace_assignee():
     assert board.claim("2", "carol") is not None
 
 
+def test_claim_normalizes_whitespace_agent_name():
+    """#5 回归:claim 归一 agent_name(同 create/update 的 _norm_assignee),三路 assignee 写入一致。
+
+    旧实现 claim 写裸 agent_name(三路里唯一未归一);带空白(经 #4 前的 spawn 漏网)原样存
+    ' bob ',后续同任务再 claim 'bob'(归一)CAS `assignee not in (None, agent)` 不等 → 永久
+    失败。修后 CAS 与存储都用归一名,与 create/update 三路一致。
+    """
+    board = TaskBoard()
+    board.create(title="A")  # #1 pending
+    # 带空白 agent_name → 归一后存 "bob"(非 " bob ")
+    claimed = board.claim("1", " bob ")
+    assert claimed is not None and claimed.assignee == "bob"
+    # 归一后存的名与显式 strip 一致;update 用同一名改派不被挡(三路归一一致)
+    t = board.update("1", assignee="bob")
+    assert t.assignee == "bob"
+
+
 def test_task_board_claim_atomic():
     """T1:claim 同步 CAS 原子语义。
 

@@ -145,6 +145,8 @@ class TurnController:
         # notify_wake 空闲时后台起 _drain,持有其 task 引用(防 asyncio GC 中断执行)。
         self._drain_task: asyncio.Task[None] | None = None
         self._aborted: bool = False  # /clear 用：置 True 后本轮 CancelledError 不发 Interrupted
+        # 退出态(on_unmount 置 True):notify_wake/receive 直接 return,不起新后台 drain。
+        self._shutting_down: bool = False
 
     @property
     def queue_size(self) -> int:
@@ -171,7 +173,12 @@ class TurnController:
         正忙 → _WAKE 入队,由在跑的 _drain 消费。
         与 submit 的关键区别:submit 空闲时 await drain(同步语义,调用方等到完成);
         wake 是后台注入,绝不阻塞调用方(manager._inject 在子 agent 监管 task 里同步调用)。
+
+        退出态(on_unmount 置 _shutting_down):直接 return——免退出期起新后台 drain 跑
+        run_agent_loop(#1)。通知行已由 _inject 落盘(若需),resume 时再消费;退出当下不跑 LLM 轮。
         """
+        if self._shutting_down:
+            return
         self._queue.enqueue(_WAKE)
         if not self.busy:
             self.busy = True
@@ -186,7 +193,11 @@ class TurnController:
         与 submit(用户输入,空闲时 await drain)和 notify_wake(系统注入)并列:teammate 消息
         走 str 分派(_drain→_process),与 _WakeInput(_process_wake)井水不犯河水。现有
         user/notify_wake/异步子 agent 通知流程全不变。
+
+        退出态同 notify_wake:直接 return(免退出期起新后台 drain,#1)。
         """
+        if self._shutting_down:
+            return
         text = f"[来自 {msg.sender}]: {msg.content}"
         self._queue.enqueue(_PeerInput(text))  # peer 消息不计 _user_count(状态栏不虚增)
         if not self.busy:
@@ -204,6 +215,21 @@ class TurnController:
         exc = task.exception()
         if exc is not None:
             log.error("background drain task failed", exc_info=exc)
+
+    def begin_shutdown(self) -> None:
+        """退出(on_unmount 最先调):抑制后续后台 drain + 取消已起的 orphan drain(#1)。
+
+        notify_wake/receive 空闲时 create_task(_drain) 跑 run_agent_loop。退出收尾链
+        (cancel_all→join_all→_supervise→_inject→notify_wake)若在退出期触发,会起一个
+        on_unmount 既不 await 也不 cancel 的 orphan drain,在 MCP/store 的 await 期间跑 LLM 轮 +
+        工具(Write/Bash)——d37798c 的 join_all 把它从偶发变成确定。置 _shutting_down 后
+        notify_wake/receive 直接 return(不起新 drain);并取消已起的 _drain_task(退出前夕刚好
+        有子 agent/teammate 完成触发的尾音)。busy 内联 drain(submit 驱动,_stream_task 链)是
+        退出前既有行为、非本提交引入,不在此处置理。
+        """
+        self._shutting_down = True
+        if self._drain_task is not None and not self._drain_task.done():
+            self._drain_task.cancel()
 
     def interrupt(self) -> None:
         if self._stream_task is not None and not self._stream_task.done():

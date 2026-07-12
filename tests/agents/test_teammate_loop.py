@@ -891,6 +891,15 @@ async def test_spawn_teammate_tool(tmp_path, monkeypatch):
     assert "保留名" in out5
     assert "lead" not in team.names()
 
+    # #4:大小写不敏感保留名 + 入口 strip 空白(原裸 Field 让 'Lead'/' bob ' 滑过检查)。
+    out_case = await tool.execute(name="Lead", prompt="x")  # 大小写撞 lead → 拒
+    assert "保留名" in out_case and "Lead" not in team.names()
+    out_ws = await tool.execute(name=" alice ", prompt="y")  # 首尾空白 → strip 后注册 "alice"
+    assert "alice" in out_ws
+    assert "alice" in team.names() and " alice " not in team.names()
+    out_empty = await tool.execute(name="   ", prompt="z")  # 纯空白 → 拒
+    assert "不能为空" in out_empty and not team.names().count(" alice ")
+
     # 清理:shutdown_all + 等 teammate 终止(worktree 经 finally 清理)
     team.shutdown_all()
     for h in list(team._handles.values()):

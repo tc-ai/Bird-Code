@@ -194,7 +194,7 @@ class TeamManager:
             except asyncio.CancelledError:
                 pass  # cancel_all/shutdown_all 触发的正常终态
             except Exception:  # noqa: BLE001 - 退出路径不因单个 teammate 异常中断其余清理
-                pass
+                log.debug("teammate 清理 task 抛异常(已忽略,继续其余清理)", exc_info=True)
 
         try:
             await asyncio.wait_for(
@@ -204,6 +204,10 @@ class TeamManager:
             log.debug(
                 "teammate 清理未在 %.1fs 内全部完成,放弃等待(退化为 best-effort)", timeout
             )
+        except asyncio.CancelledError:
+            # #2:退出路径被 cancel 时不在 join 窗口抛出——让调用方继续后续清理(join_all 契约:
+            # 绝不因清理窗口传播取消)。store.close 由 on_unmount 的 finally 兜底。
+            log.debug("teammate 清理被取消(退出路径,退化为 best-effort)")
 
     def reset(self) -> None:
         """新 session 重置(/clear 用):cancel 所有 teammate + 清 registry/board。

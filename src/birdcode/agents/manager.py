@@ -120,7 +120,7 @@ class SubagentManager:
             except asyncio.CancelledError:
                 pass  # cancel_all 触发的正常终态
             except Exception:  # noqa: BLE001 - 退出路径不因单个子 agent 异常中断其余清理
-                pass
+                log.debug("异步子 agent 清理 task 抛异常(已忽略,继续其余清理)", exc_info=True)
 
         try:
             await asyncio.wait_for(
@@ -130,3 +130,8 @@ class SubagentManager:
             log.debug(
                 "异步子 agent 清理未在 %.1fs 内全部完成,放弃等待(退化为 best-effort)", timeout
             )
+        except asyncio.CancelledError:
+            # #2:退出路径被 cancel(如 on_unmount 期 SIGINT)时不在 join 窗口抛出——让调用方
+            # 继续后续 MCP/store 清理(join_all 契约:绝不因清理窗口传播取消)。store.close 由
+            # on_unmount 的 finally 兜底,此处只需不阻断。
+            log.debug("异步子 agent 清理被取消(退出路径,退化为 best-effort)")

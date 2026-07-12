@@ -453,3 +453,29 @@ async def test_receive_does_not_inflate_user_count():
 
     gate.set()
     await task
+
+
+@pytest.mark.asyncio
+async def test_begin_shutdown_suppresses_notify_wake_and_receive():
+    """#1 回归:begin_shutdown 后 notify_wake/receive 不起后台 drain(免退出期跑 run_agent_loop)。
+
+    d37798c 的 join_all 让退出收尾链(cancel_all→join_all→_supervise→_inject→notify_wake)确定
+    触发 notify_wake;空闲态会 create_task(_drain)→_process_wake→run_agent_loop——一个 on_unmount
+    既不 await 也不 cancel 的 orphan drain,在退出收尾的 MCP/store await 期跑 LLM 轮 + 工具。
+    修后 _shutting_down 门控:notify_wake/receive 直接 return,不起 _drain_task、不置 busy、不发事件。
+    """
+    received = []
+
+    async def on_event(ev):
+        received.append(ev)
+
+    p = FakeProvider([TextDelta(text="x"), Done(usage=TokenUsage())])
+    ctrl = TurnController(p, on_event=on_event, on_status=_noop_status)
+    ctrl.begin_shutdown()
+    assert ctrl._shutting_down is True  # noqa: SLF001
+
+    ctrl.notify_wake()  # 退出态:no-op
+    assert ctrl._drain_task is None and ctrl.busy is False  # noqa: SLF001
+    ctrl.receive(MailboxMessage(sender="t", to="lead", content="hi"))  # 同样 no-op
+    assert ctrl._drain_task is None and ctrl.busy is False  # noqa: SLF001
+    assert received == []  # 没跑 turn(无 TurnStart/TextDelta)

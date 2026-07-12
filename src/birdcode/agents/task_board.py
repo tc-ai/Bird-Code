@@ -127,14 +127,20 @@ class TaskBoard:
 
         原子性:同步段无 await,asyncio 不会在中间穿插 → 两 teammate 先后 claim 同一 pending,
         第二个必见 in_progress → None(根除裸 TaskUpdate 的 last-writer-wins double-claim)。
+
+        agent_name 归一化(同 create/update 的 _norm_assignee):#5——claim 是三个 assignee 写入
+        路径里唯一未归一的;若 agent_name 带空白(经 #4 前的 spawn 漏网,或直接调 claim),会原样
+        存进 t.assignee,后续 update(assignee=strip 后) 的 CAS `assignee not in (None, agent)`
+        永不等 → 任务卡死。CAS 与存储都用归一后的名,与 create/update 三路一致。
         """
+        agent = _norm_assignee(agent_name)
         t = self._tasks.get(tid)
         if t is None:
             return None
         if t.status != "pending":
             return None
-        if t.assignee not in (None, agent_name):
+        if t.assignee not in (None, agent):
             return None
         t.status = "in_progress"
-        t.assignee = agent_name
+        t.assignee = agent
         return t
