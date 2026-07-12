@@ -74,6 +74,53 @@ async def test_task_update_assignee_only_does_not_echo_status():
     assert "status=in_progress" in out2
 
 
+def test_update_refuses_manual_blocked():
+    """F9 回归:manual status=blocked 被拒(保持原状)。
+
+    blocked 只能由 create(带 blocked_by + 建反向边)产生,或前置完成时自动解锁;
+    update 手写 blocked 无 blocked_by/反向边 → 永久搁死(无人能解锁它)。
+    """
+    board = TaskBoard()
+    board.create(title="A")  # #1 pending
+    t = board.update("1", status="blocked")
+    assert t is not None and t.status == "pending"  # 拒:未变
+    assert t.blocked_by == []  # 仍无依赖(未被当真 blocked)
+
+
+def test_update_refuses_flipping_blocked_with_incomplete_deps():
+    """F4/F5 回归:依赖未完成的 blocked 任务,手动转 pending/completed 被拒。
+
+    否则:翻 pending → 可被 claim(绕过依赖);标 completed → 误级联解锁后继。
+    A 完成后 B 由级联自动解锁为 pending(非手动),再 complete 合法放行。
+    """
+    board = TaskBoard()
+    board.create(title="A")  # #1 pending(未完成)
+    b = board.create(title="B", blocked_by=["1"])  # #2 blocked
+    assert b.status == "blocked"
+
+    assert board.update("2", status="pending").status == "blocked"  # 拒
+    assert board.update("2", status="completed").status == "blocked"  # 拒(且不级联)
+
+    board.update("1", status="completed")  # A done → B 自动解锁为 pending
+    assert board.get("2").status == "pending"
+    assert board.update("2", status="completed").status == "completed"  # 合法放行
+
+
+def test_create_normalizes_empty_assignee_and_dedups_deps():
+    """F8 回归:assignee='' 归一为 None(claim 不再把 '' 当「指派给某人」永锁)。
+    F11 回归:blocked_by 去重(重复 id 不污染前置的 blocks 反向边)。"""
+    board = TaskBoard()
+    board.create(title="A")  # #1
+    # F8:空串 assignee → None → 可被 claim(未被 '' 锁成「指派给别人」)
+    t2 = board.create(title="B", assignee="")
+    assert t2.assignee is None
+    assert board.claim("2", "bob") is not None
+    # F11:重复依赖去重;反向边只追加一次
+    t3 = board.create(title="C", blocked_by=["1", "1"])
+    assert t3.blocked_by == ["1"]
+    assert board.get("1").blocks.count("3") == 1  # 旧实现会追加两次
+
+
 def test_task_board_claim_atomic():
     """T1:claim 同步 CAS 原子语义。
 

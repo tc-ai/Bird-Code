@@ -6,7 +6,7 @@ build_child_registry fork 返 self 继承。created_by 取 _AGENT_NAME(lead→"l
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
@@ -56,8 +56,9 @@ class TaskCreateTool(Tool):
 
 
 class TaskListInput(BaseModel):
-    status: str | None = Field(
-        None, description="按状态过滤:pending|in_progress|completed。None=全部(pull 时常用 pending)"
+    status: Literal["pending", "blocked", "in_progress", "completed"] | None = Field(
+        None,
+        description="状态过滤(pending/blocked/in_progress/completed);None=全部",
     )
 
 
@@ -92,8 +93,14 @@ class TaskListTool(Tool):
 
 class TaskUpdateInput(BaseModel):
     id: str = Field(..., description="任务 id")
-    status: str | None = Field(None, description="新状态:pending|in_progress|completed")
-    assignee: str | None = Field(None, description="改指派(可选)")
+    status: Literal["pending", "blocked", "in_progress", "completed"] | None = Field(
+        None,
+        description=(
+            "新状态:pending|in_progress|completed。领取任务请用 TaskClaim(原子 CAS),"
+            "勿直接设 in_progress——后者非原子,双人抢同一任务会 last-writer-wins"
+        ),
+    )
+    assignee: str | None = Field(None, description="改指派(可选;空串等同未指派)")
 
 
 class TaskUpdateTool(Tool):

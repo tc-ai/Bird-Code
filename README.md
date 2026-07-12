@@ -167,7 +167,27 @@ uv run birdcode
 
 # 在 git worktree 里启动(多终端并行开发)
 uv run birdcode --worktree <name>
+
+# 接续本项目最近一次会话
+uv run birdcode --continue
+
+# 指定 profile 与主题启动
+uv run birdcode --profile gpt --theme light
 ```
+
+### 命令行参数
+
+| 参数 | 简写 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `--profile <name>` | `-p` | 配置里的 `default` | 使用的 provider profile;留空走配置 `default`,`mock` 为离线回退(无需 API key) |
+| `--theme <name>` | `-t` | `dark` | TUI 主题:`dark` / `light` |
+| `--config <path>` | — | 见「配置」加载顺序 | 指定配置文件路径,覆盖默认查找 |
+| `--continue` | `-c` | 关 | 接续本项目最近一次会话(按 mtime) |
+| `--resume <id>` | `-r` | — | 接续指定 sessionId(用 `/sessions` 查可用 id;与 `-c` 互斥) |
+| `--worktree <name>` | `-w` | — | 在隔离的 git worktree 里起会话(并行开发;退出时清理) |
+| `--delay <sec>` | — | `0.012` | `mock` profile 的 token 流式间隔(秒) |
+
+> `-c` 与 `-r` 互斥,同时给会报错;`--resume <id>` 仅允许字母数字与连字符,且须对应已存在会话。worktree 会话的存储与主仓隔离——`birdcode -c`(在主仓)只找主仓会话,`birdcode -w <name> -c` 只找该 worktree 的会话。
 
 启动后在输入框输入 `/` 查看 slash 命令（`/help`、`/compact`、`/clear`、`/permissions`、`/sessions` 等），`Tab` 补全命令与文件路径。
 

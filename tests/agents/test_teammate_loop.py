@@ -6,6 +6,8 @@ teammate 跑第 1 轮→park→mailbox 唤醒跑第 2 轮;第 2 轮 history 含�
 """
 import asyncio
 import json
+import shutil
+import subprocess
 
 import pytest
 
@@ -17,6 +19,25 @@ from birdcode.config.schema import AppConfig, ProviderProfile
 from birdcode.session.models import SessionContext
 from birdcode.session.paths import subagent_meta_path
 from birdcode.session.subagent_meta import read_subagent_meta
+
+_HAS_GIT = shutil.which("git") is not None
+
+
+def _git_init(repo):  # type: ignore[no-untyped-def]
+    """init git 仓库 + 初始 commit src/foo.py(给 worktree 基线 + src/ 目录)。
+
+    teammate 强制 worktree 隔离 → 需 git 仓库;镜像 test_agent_worktree_e2e._init_repo。
+    """
+    for c in (
+        ["git", "init"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+    ):
+        subprocess.run(c, cwd=repo, check=True, capture_output=True)
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src" / "foo.py").write_text("# original\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
 
 
 class _HistoryRecordingProvider:
@@ -781,8 +802,32 @@ async def test_team_manager_reset(tmp_path, monkeypatch):
             await h.join()  # cancel 异步传播,join 等其终止
 
 
+def test_reset_preserves_lead_recipient():
+    """F1 回归:reset() 保留 lead 注册(teammate→lead 通道在 /clear 后不断)。
+
+    生产 App.on_mount 注册 lead=controller.receive;/clear 调 reset()。若 reset 随 registry
+    一并清 lead,则 SendMessage(to=lead) 与 teammate 完成通知在 /clear 后全断(回归到 review
+    #1 的死路)。lead deliver 跨 /clear 仍有效(同一 TurnController 实例,只重绑 _store)→ 保留。
+    未注册过 lead 的 team,reset 后 names() 仍为空(test_team_manager_reset 已覆盖)。
+    """
+    from birdcode.agents.teammate import TeamManager
+
+    team = TeamManager()
+    received: list = []
+    team.register("lead", lambda m: received.append(m))
+    team.reset()
+    deliver = team.resolve("lead")
+    assert deliver is not None, "reset() 不应清掉 lead 注册"
+    deliver(MailboxMessage(sender="bob", to="lead", content="hi"))
+    assert received and received[0].content == "hi"
+
+
+@pytest.mark.skipif(not _HAS_GIT, reason="git not installed")
 async def test_spawn_teammate_tool(tmp_path, monkeypatch):
-    """S6:SpawnTeammateTool → 构造 mailbox runner + team_mgr.spawn;起 + 注册 + 重名拒。"""
+    """S6:SpawnTeammateTool → 构造 mailbox runner + team_mgr.spawn;起 + 注册 + 重名拒 + 保留名拒。
+
+    teammate 强制 worktree 隔离(F2)→ project_root 须为 git 仓库,故 _git_init(tmp_path)。
+    """
     from birdcode.agents import runner
     from birdcode.agents.teammate import TeamManager
     from birdcode.tools.spawn_teammate_tool import SpawnTeammateTool
@@ -791,6 +836,7 @@ async def test_spawn_teammate_tool(tmp_path, monkeypatch):
         return _HistoryRecordingProvider(profile=profile)
 
     monkeypatch.setattr(runner, "build_provider", _builder)
+    _git_init(tmp_path)  # F2:SpawnTeammate 需 git 仓库(worktree 隔离)
 
     team = TeamManager()
     tool = SpawnTeammateTool(
@@ -806,7 +852,80 @@ async def test_spawn_teammate_tool(tmp_path, monkeypatch):
     out2 = await tool.execute(name="bob", prompt="再次")
     assert "已存在" in out2
 
-    # 清理:shutdown_all + 等 teammate 终止(免悬挂)
+    # F12:保留名 stop/view → 拒(/agents 子命令首段冲突,经 /agents 永远寻不到)
+    out3 = await tool.execute(name="stop", prompt="x")
+    out4 = await tool.execute(name="view", prompt="y")
+    assert "冲突" in out3 and "冲突" in out4
+    assert "stop" not in team.names() and "view" not in team.names()
+
+    # 清理:shutdown_all + 等 teammate 终止(worktree 经 finally 清理)
+    team.shutdown_all()
+    for h in list(team._handles.values()):
+        await h.join()
+
+
+async def test_spawn_teammate_requires_git(tmp_path, monkeypatch):
+    """F2:project_root 非 git 仓库 → SpawnTeammate fast-fail(不 spawn 必崩的 teammate)。
+
+    teammate 强制 worktree 隔离,create_worktree 需 .git;入口预检返友好错误。
+    不跑 git,故无需 _HAS_GIT skip。
+    """
+    from birdcode.agents.teammate import TeamManager
+    from birdcode.tools.spawn_teammate_tool import SpawnTeammateTool
+
+    team = TeamManager()
+    tool = SpawnTeammateTool(
+        team_mgr=team, defn=_defn(), cfg=_cfg(), app=None, ctx=_ctx(),
+        project_root=tmp_path,  # 裸 tmp_path,无 .git
+        parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+        parent_registry=None, parent_gate=None, progress_cb=None,
+    )
+    out = await tool.execute(name="bob", prompt="做 X")
+    assert "git" in out and "错误" in out
+    assert "bob" not in team.names()  # 未 spawn
+
+
+@pytest.mark.skipif(not _HAS_GIT, reason="git not installed")
+async def test_spawn_teammate_creates_isolated_worktrees(tmp_path, monkeypatch):
+    """F2 修复回归:SpawnTeammate 强制 isolation=worktree → 每个 teammate 独立 worktree(互不串改)。
+
+    旧实现 is_async 无 isolation → fork_async L5 拒所有非 bash 写 → 编码 teammate 废。修后两
+    teammate 各起独立 worktree 目录(<repo>/.birdcode/worktrees/<agent_id>),路径互不相同。
+    (「worktree 内写隔离、同名文件不串」由 test_agent_worktree_e2e 对 SubagentRunner 全覆盖,
+    此处只验 SpawnTeammate 把 teammate 路由进了 worktree。)
+    """
+    from birdcode.agents import runner
+    from birdcode.agents.teammate import TeamManager
+    from birdcode.tools.spawn_teammate_tool import SpawnTeammateTool
+
+    def _builder(profile, app, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _HistoryRecordingProvider(profile=profile)
+
+    monkeypatch.setattr(runner, "build_provider", _builder)
+    _git_init(tmp_path)
+
+    team = TeamManager()
+    tool = SpawnTeammateTool(
+        team_mgr=team, defn=_defn(), cfg=_cfg(), app=None, ctx=_ctx(),
+        project_root=tmp_path,
+        parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+        parent_registry=None, parent_gate=None, progress_cb=None,
+    )
+    await tool.execute(name="alice", prompt="做 A")
+    await tool.execute(name="bob", prompt="做 B")
+
+    # 两 teammate 各自 worktree 异步创建 → 轮询直到 .birdcode/worktrees/ 下出现 2 个目录
+    wt_root = tmp_path / ".birdcode" / "worktrees"
+    for _ in range(100):
+        if wt_root.exists() and len(list(wt_root.iterdir())) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    assert wt_root.exists(), "worktree 根目录未创建(isolation=worktree 未生效?)"
+    names = sorted(p.name for p in wt_root.iterdir())
+    assert len(names) == 2, f"两 teammate 应各有独立 worktree,实际: {names}"
+    assert len(set(names)) == 2  # 两个不同 agent_id,互不串
+
+    # 清理:shutdown_all → teammate 终止 → finally 清 worktree
     team.shutdown_all()
     for h in list(team._handles.values()):
         await h.join()

@@ -161,8 +161,17 @@ class TeamManager:
 
         工具持的 team_mgr 引用不变(只清内部状态),故 /clear 后无需重注册 team 工具。
         cancel_all 用 task.cancel(同步调度),teammate 异步收 CancelledError 终止。
+
+        lead 的 deliver(controller.receive)跨 /clear 保留:App 全程用同一个
+        TurnController 实例(/clear 只重绑其 _store,不换实例)→ bound method 仍有效。
+        若随 registry 一并清掉,teammate→lead 通道会在每次 /clear 后断(SendMessage(to=lead)
+        变未知 recipient、teammate 完成通知被丢)。spawn 的 teammate deliver 不保留(其 task
+        已被 cancel_all 终止)。
         """
+        lead_deliver = self._recipients.get("lead")
         self.cancel_all()
         self._recipients.clear()
         self._handles.clear()
         self.task_board = TaskBoard()
+        if lead_deliver is not None:
+            self._recipients["lead"] = lead_deliver

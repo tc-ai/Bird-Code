@@ -502,6 +502,11 @@ class BirdApp(App[None]):
             )
 
             self._team_mgr = _TeamManager()
+            # 注册 lead 为 recipient:teammate→lead 通道(SendMessage(to="lead") 路由 +
+            # teammate 完成通知 _on_done→_recipients["lead"])。lead 的 deliver =
+            # controller.receive(格式化 peer 消息入队、空闲时后台起 drain)。全程同一
+            # TurnController 实例(/clear 只重绑 _store),reset() 据此保留 lead 注册。
+            self._team_mgr.register("lead", self.controller.receive)
             for _team_tool in (
                 SendMessageTool(self._team_mgr),
                 TaskCreateTool(self._team_mgr),
@@ -1230,6 +1235,13 @@ class BirdApp(App[None]):
         退出时 startup task 可能仍在跑:先 cancel+await 它(各 _server_lifecycle 的 finally 回滚
         自己的 transport),再 shutdown——避免与 shutdown 并发改 _sessions/_server_tasks。
         """
+        # 0) 取消在跑的 teammate / 异步子 agent:退出时别让它们悬挂(meta 卡 running/idle、
+        # 侧链写一半)。cancel 经 runner 的 CancelledError 路径把 meta 落 cancelled + close store。
+        # 与 action_interrupt 同两行;此处不 await(退出路径不阻塞等它们收尾,best-effort)。
+        if self._team_mgr is not None:
+            self._team_mgr.cancel_all()
+        if self._subagent_mgr is not None:
+            self._subagent_mgr.cancel_all()
         # 1) 收尾后台 startup task。无条件 await(即使已完成):检索其异常,防 asyncio
         # "Task exception was never retrieved" 警告 + 静默丢弃(startup 尾巴的 BaseException
         # 如 SystemExit 逃过 _start_mcp_background 的 except Exception 时)。cancel 仅对未完成者。

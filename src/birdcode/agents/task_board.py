@@ -36,7 +36,8 @@ class TaskBoard:
     ) -> Task:
         self._next_id += 1
         tid = str(self._next_id)
-        deps = list(blocked_by or [])
+        # 去重依赖(保序):重复 id 会让前置的 blocks 列表追加同一后继多次,污染反向边。
+        deps = list(dict.fromkeys(blocked_by or []))
         # 校验:依赖必须已存在(无悬空;且只能依赖更早 task → 结构保证 DAG,无需环检测)。
         missing = [d for d in deps if d not in self._tasks]
         if missing:
@@ -45,8 +46,9 @@ class TaskBoard:
         status = "pending"
         if deps and not all(self._tasks[d].status == "completed" for d in deps):
             status = "blocked"
+        # assignee 归一化:空串视作未指派(否则 claim 把 "" 当「指派给某人」永锁,却渲染成未指派)。
         t = Task(
-            id=tid, title=title, status=status, assignee=assignee,
+            id=tid, title=title, status=status, assignee=assignee or None,
             created_by=created_by, blocked_by=deps,
         )
         self._tasks[tid] = t
@@ -67,12 +69,26 @@ class TaskBoard:
         t = self._tasks.get(tid)
         if t is None:
             return None
-        if status is not None:
-            t.status = status
+        # assignee 归一化:空串视作未指派(同 create;否则 claim 把 "" 当「指派给某人」永锁)。
         if assignee is not None:
-            t.assignee = assignee
+            t.assignee = assignee or None
+        if status is not None and status != t.status:
+            # 状态机守卫(只拦非法转移;合法转移与级联解锁一律放行,已有测试全覆盖):
+            # - 手动写 blocked:F9。blocked 只能由 create(带 blocked_by + 建反向边)产生或前置
+            #   完成时自动解锁;update 手写无 blocked_by/反向边 → 永久搁死。拒(保持原状)。
+            # - 把「依赖未全完成」的 blocked 任务转出:F4/F5。否则破坏依赖不变式(blocked 任务
+            #   被标 completed 会误级联解锁后继 / 翻 pending 后可被 claim)。仅当依赖已全完成
+            #   (等价自动解锁的合法情形)才放行。
+            if status == "blocked":
+                return t
+            if t.status == "blocked" and not all(
+                self._tasks[d].status == "completed" for d in t.blocked_by
+            ):
+                return t
+            t.status = status
         # 完成自动解锁:遍历后继(t.blocks),blocked_by 全 completed 的 blocked→pending。
         # 单进程同步段原子,无需 Lock;只认 completed 触发(前置 in_progress/blocked 不解锁)。
+        # 守卫已确保只有合法 completed(非 blocked 强转)能走到这——不会误级联。
         if status == "completed":
             for succ_id in t.blocks:
                 succ = self._tasks.get(succ_id)

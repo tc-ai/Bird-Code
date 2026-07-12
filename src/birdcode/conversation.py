@@ -91,12 +91,12 @@ class MessageQueue:
         # 忙时若干异步子 agent 完成会虚增 ⌛N(误显为用户在排队输入)。
         self._user_count = 0
 
-    def enqueue(self, item: str | _WakeInput) -> None:
+    def enqueue(self, item: str | _WakeInput | _PeerInput) -> None:
         self._q.put_nowait(item)
         if isinstance(item, str):
             self._user_count += 1
 
-    def dequeue_nowait(self) -> str | _WakeInput | None:
+    def dequeue_nowait(self) -> str | _WakeInput | _PeerInput | None:
         try:
             item = self._q.get_nowait()
         except asyncio.QueueEmpty:
