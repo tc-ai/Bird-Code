@@ -23,6 +23,17 @@ class Task:
     blocks: list[str] = field(default_factory=list)  # 反向:被我阻塞的 task id
 
 
+def _norm_assignee(assignee: str | None) -> str | None:
+    """归一化:None/空串/纯空白 → None。
+
+    否则 claim 把 falsy assignee 当「指派给某人」永锁(待指派者名永不等),却渲染成未指派。
+    F7:旧 `assignee or None` 只挡空串,纯空白 ' ' truthy 会同样滑过 → 任务永久不可 claim。
+    """
+    if assignee is None:
+        return None
+    return assignee.strip() or None
+
+
 class TaskBoard:
     """team 共享的 flat 任务看板。所有方法同步(无 await)→ asyncio 下原子。"""
 
@@ -46,9 +57,9 @@ class TaskBoard:
         status = "pending"
         if deps and not all(self._tasks[d].status == "completed" for d in deps):
             status = "blocked"
-        # assignee 归一化:空串视作未指派(否则 claim 把 "" 当「指派给某人」永锁,却渲染成未指派)。
+        # assignee 归一化:None/空串/纯空白 → None(同 update;否则 claim 把 falsy 当永锁)。
         t = Task(
-            id=tid, title=title, status=status, assignee=assignee or None,
+            id=tid, title=title, status=status, assignee=_norm_assignee(assignee),
             created_by=created_by, blocked_by=deps,
         )
         self._tasks[tid] = t
@@ -69,9 +80,11 @@ class TaskBoard:
         t = self._tasks.get(tid)
         if t is None:
             return None
-        # assignee 归一化:空串视作未指派(同 create;否则 claim 把 "" 当「指派给某人」永锁)。
-        if assignee is not None:
-            t.assignee = assignee or None
+        # 状态机守卫先于 assignee 改动(F3):拒则原样 return t——绝不半应用 assignee。否则
+        # 被拒的 update(status=blocked, assignee=alice) 会先写 assignee=alice 再因 status 拒返回,
+        # 任务被预锁给 alice,后续他人 claim 全失败(last-writer 残留)。整笔 update 原子:守卫
+        # 不过 → status/assignee 均不动;守卫过了 → 再应用 assignee。TaskUpdateTool 据返回的
+        # t.status != 请求值识别「被拒」并显式告知 LLM(免把未变的 status 报成「已更新」)。
         if status is not None and status != t.status:
             # 状态机守卫(只拦非法转移;合法转移与级联解锁一律放行,已有测试全覆盖):
             # - 手动写 blocked:F9。blocked 只能由 create(带 blocked_by + 建反向边)产生或前置
@@ -86,6 +99,9 @@ class TaskBoard:
             ):
                 return t
             t.status = status
+        # 守卫过了(或本轮无 status 改动)才动 assignee(归一化同 create)。
+        if assignee is not None:
+            t.assignee = _norm_assignee(assignee)
         # 完成自动解锁:遍历后继(t.blocks),blocked_by 全 completed 的 blocked→pending。
         # 单进程同步段原子,无需 Lock;只认 completed 触发(前置 in_progress/blocked 不解锁)。
         # 守卫已确保只有合法 completed(非 blocked 强转)能走到这——不会误级联。

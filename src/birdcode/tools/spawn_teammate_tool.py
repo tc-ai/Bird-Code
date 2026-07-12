@@ -25,9 +25,12 @@ from birdcode.session.models import SessionContext
 from birdcode.tools.base import Tool
 from birdcode.tools.registry import ToolRegistry
 
-# /agents 子命令首段(builtins._agents 用 head == "stop"/"view" 分发)。名为这两者的
-# teammate 经 /agents 寻不到 → SpawnTeammate 入口拒。与子命令集保持同步(builtins 改时更新)。
-_RESERVED_NAMES: frozenset[str] = frozenset({"stop", "view"})
+# 保留名,SpawnTeammate 入口拒(先于「已存在」检查,给清晰原因而非困惑的「已存在」):
+# - stop/view:/agents 子命令首段(builtins._agents 用 head=="stop"/"view" 分发),名为这两者
+#   的 teammate 经 /agents 寻不到(被当子命令处理)。与子命令集保持同步(builtins 改时更新)。
+# - lead:主 session 的系统 recipient(app.on_mount 预注册为 controller.receive);team_mgr
+#   起步即含该名 → 不保留则 SpawnTeammate(name='lead') 撞「已存在」却从未 spawn 过该名 teammate。
+_RESERVED_NAMES: frozenset[str] = frozenset({"stop", "view", "lead"})
 
 
 class SpawnTeammateInput(BaseModel):
@@ -75,15 +78,20 @@ class SpawnTeammateTool(Tool):
         self.progress_cb = progress_cb
 
     async def execute(self, *, name: str, prompt: str) -> str:
-        if name in self.team_mgr.names():
-            return f"错误:teammate '{name}' 已存在,请换名。"
-        # 保留名:/agents 把首段当子命令分发(stop <name> / view <name>),名为 stop/view
-        # 的 teammate 经 /agents 永远寻不到(被当子命令处理)。SpawnTeammate 入口拒,避免死局。
+        # 保留名先于「已存在」拒(F11):lead 是系统 recipient(app 预注册,team_mgr 起步即含),
+        # 撞它会报「已存在」却从未 spawn 过该名 teammate;stop/view 是 /agents 子命令冲突。
         if name in _RESERVED_NAMES:
+            if name == "lead":
+                return (
+                    "错误:'lead' 是主 session 的保留名(teammate→lead 通道预注册占用),"
+                    "不能用作 teammate 名。请换名。"
+                )
             return (
                 f"错误:teammate 名 '{name}' 与 /agents 子命令冲突(stop/view 保留),"
                 "无法经 /agents 寻址。请换名。"
             )
+        if name in self.team_mgr.names():
+            return f"错误:teammate '{name}' 已存在,请换名。"
         # teammate 强制 worktree 隔离(F2):teammate 异步后台跑、无法 HITL,写主仓不安全
         # (fork_async 的 L5 会拒所有非 bash 写 → 编码 teammate 废)。worktree 把每个 teammate 的
         # 写锁在它自己的目录(fork_worktree_async:L2 沙箱锁 worktree + L5 恒 approve),互不串改;

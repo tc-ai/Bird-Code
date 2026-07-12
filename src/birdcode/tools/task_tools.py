@@ -93,14 +93,15 @@ class TaskListTool(Tool):
 
 class TaskUpdateInput(BaseModel):
     id: str = Field(..., description="任务 id")
-    status: Literal["pending", "blocked", "in_progress", "completed"] | None = Field(
+    status: Literal["pending", "in_progress", "completed"] | None = Field(
         None,
         description=(
             "新状态:pending|in_progress|completed。领取任务请用 TaskClaim(原子 CAS),"
-            "勿直接设 in_progress——后者非原子,双人抢同一任务会 last-writer-wins"
+            "勿直接设 in_progress——后者非原子,双人抢同一任务会 last-writer-wins。"
+            "blocked 不可手动设(只能由依赖产生/解锁)"
         ),
     )
-    assignee: str | None = Field(None, description="改指派(可选;空串等同未指派)")
+    assignee: str | None = Field(None, description="改指派(可选;空串/纯空白等同未指派)")
 
 
 class TaskUpdateTool(Tool):
@@ -122,6 +123,21 @@ class TaskUpdateTool(Tool):
         t = self.team.task_board.update(id, status=status, assignee=assignee)
         if t is None:
             return f"未知任务 #{id}"
+        # 状态机守卫拒绝(F4/F5/F9):合法转移 update 已应用 → t.status==请求值;t.status != 请求值
+        # 必为守卫拒绝(update 既未改 status、也未动 assignee——F3 保证整笔原子)。旧实现把这种
+        # 「未变的 status」报成「已更新 #N: status=<旧值>」,LLM 收不到拒绝信号会继续推进未完成
+        # 的任务。显式回拒 + 原因,让 LLM 自决(等依赖 / 换任务 / 改用 TaskClaim)。
+        if status is not None and t.status != status:
+            if status == "blocked":
+                reason = "blocked 不可手动设置(只能由 create 带依赖产生、或前置完成时自动解锁)"
+            elif t.status == "blocked":
+                reason = "任务处于 blocked 且依赖未全部完成,不能转出(待依赖完成自动解锁后再推进)"
+            else:
+                reason = f"状态 {t.status}→{status} 不被状态机允许"
+            return (
+                f"拒绝更新 #{id}: {reason}(status 保持 {t.status},assignee 未改)。"
+                "可 TaskList 查看当前依赖状态。"
+            )
         # 只回显【实际传入】的字段:旧实现无条件附 status=,仅改 assignee 时会误报未变的 status。
         parts = []
         if status is not None:

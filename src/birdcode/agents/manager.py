@@ -102,3 +102,31 @@ class SubagentManager:
         """取消所有在跑异步子 agent(不 await;各自 _supervise 收尾写 cancelled 通知)。"""
         for task in list(self._live.values()):
             task.cancel()
+
+    async def join_all(self, *, timeout: float = 5.0) -> None:
+        """await 所有异步子 agent _supervise 终止(其 run() finally 内 worktree cleanup 跑完)。
+
+        on_unmount 退出用:cancel_all 后调,与 TeamManager.join_all 对称。不 await 则 app 关
+        loop 砍断 _supervise → async worktree 子 agent 同样留 git-locked 残留(agent_id 随机,
+        快速恢复救不了)。带总超时:cleanup 卡住不阻塞退出,超时退化为 best-effort。
+        """
+        tasks = list(self._live.values())  # 快照(_supervise finally 并发 pop 不影响迭代)
+        if not tasks:
+            return
+
+        async def _drain(t: asyncio.Task[None]) -> None:
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass  # cancel_all 触发的正常终态
+            except Exception:  # noqa: BLE001 - 退出路径不因单个子 agent 异常中断其余清理
+                pass
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*[_drain(t) for t in tasks]), timeout=timeout
+            )
+        except TimeoutError:
+            log.debug(
+                "异步子 agent 清理未在 %.1fs 内全部完成,放弃等待(退化为 best-effort)", timeout
+            )

@@ -1237,11 +1237,19 @@ class BirdApp(App[None]):
         """
         # 0) 取消在跑的 teammate / 异步子 agent:退出时别让它们悬挂(meta 卡 running/idle、
         # 侧链写一半)。cancel 经 runner 的 CancelledError 路径把 meta 落 cancelled + close store。
-        # 与 action_interrupt 同两行;此处不 await(退出路径不阻塞等它们收尾,best-effort)。
+        # 与 action_interrupt 同两行。
         if self._team_mgr is not None:
             self._team_mgr.cancel_all()
         if self._subagent_mgr is not None:
             self._subagent_mgr.cancel_all()
+        # F5:await 两者 task 终止 → runner.run() finally 内的 shielded worktree cleanup
+        # (git unlock/remove/branch-d)在 live loop 上跑完。不 await 则关 loop 时砍断 cleanup
+        # → 每次裸退出留一批 git-locked worktree(teammate/async-subagent 的 agent_id 随机,
+        # 跨会话不复用,create_worktree 的快速恢复救不了)。join_all 带总超时,git 卡时不阻塞退出。
+        if self._team_mgr is not None:
+            await self._team_mgr.join_all()
+        if self._subagent_mgr is not None:
+            await self._subagent_mgr.join_all()
         # 1) 收尾后台 startup task。无条件 await(即使已完成):检索其异常,防 asyncio
         # "Task exception was never retrieved" 警告 + 静默丢弃(startup 尾巴的 BaseException
         # 如 SystemExit 逃过 _start_mcp_background 的 except Exception 时)。cancel 仅对未完成者。

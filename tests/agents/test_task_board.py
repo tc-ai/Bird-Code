@@ -74,6 +74,35 @@ async def test_task_update_assignee_only_does_not_echo_status():
     assert "status=in_progress" in out2
 
 
+async def test_task_update_tool_reports_refusal_not_success():
+    """F2 回归:状态机守卫拒绝时,TaskUpdateTool 须回执「拒绝」,不报「已更新」+未变 status。
+
+    旧实现把被拒(返回未改的 Task)当成功,回执「已更新 #N: status=<旧值>」——LLM 收不到拒绝
+    信号,会继续推进未完成的任务。修后 t.status != 请求值即识别为拒,回执带原因。
+    """
+    from birdcode.agents.teammate import TeamManager
+    from birdcode.tools.task_tools import TaskCreateTool, TaskUpdateTool
+
+    team = TeamManager()
+    await TaskCreateTool(team).execute(title="A")  # #1 pending
+    update = TaskUpdateTool(team)
+
+    # 手动设 blocked → 拒(F9):不报「已更新」
+    out = await update.execute(id="1", status="blocked")
+    assert "拒绝" in out and "已更新" not in out
+    assert team.task_board.get("1").status == "pending"  # 未变
+
+    # blocked 任务(依赖未完成)转出 → 拒(F4/F5)
+    await TaskCreateTool(team).execute(title="B", blocked_by=["1"])  # #2 blocked
+    out2 = await update.execute(id="2", status="completed")
+    assert "拒绝" in out2 and "已更新" not in out2
+    assert team.task_board.get("2").status == "blocked"  # 未变,且未误级联解锁后继
+
+    # 合法转移仍报「已更新」(对照:非全拒)
+    out3 = await update.execute(id="1", status="completed")
+    assert "已更新" in out3 and "status=completed" in out3
+
+
 def test_update_refuses_manual_blocked():
     """F9 回归:manual status=blocked 被拒(保持原状)。
 
@@ -119,6 +148,38 @@ def test_create_normalizes_empty_assignee_and_dedups_deps():
     t3 = board.create(title="C", blocked_by=["1", "1"])
     assert t3.blocked_by == ["1"]
     assert board.get("1").blocks.count("3") == 1  # 旧实现会追加两次
+
+
+def test_update_refusal_does_not_leak_assignee():
+    """F3 回归:被拒的状态转移不半应用 assignee。
+
+    旧实现先改 assignee 再过 status 守卫 → update(id, status=blocked, assignee=alice) 会先写
+    assignee=alice 再因 blocked 拒返回,任务被预锁给 alice,后续他人 claim 全失败。修后整笔
+    原子:守卫不过则 status/assignee 均不动。
+    """
+    board = TaskBoard()
+    board.create(title="A")  # #1 pending
+    t = board.update("1", status="blocked", assignee="alice")  # status 拒
+    assert t.status == "pending"  # 未变(拒)
+    assert t.assignee is None  # 关键:未被半应用(否则 alice 预锁)
+    assert board.claim("1", "bob") is not None  # 未被锁,他人可抢
+
+
+def test_create_and_update_normalize_whitespace_assignee():
+    """F7 回归:纯空白 assignee 归一为 None。
+
+    旧 `assignee or None` 只挡空串,纯空白 ' ' truthy 滑过 → assignee=' ' 永锁任务(claim 时
+    ' ' not in (None, agent) 恒真,无人可抢)。修后 strip,create/update 均归一。
+    """
+    board = TaskBoard()
+    t = board.create(title="A", assignee="   ")  # 纯空白
+    assert t.assignee is None
+    assert board.claim("1", "bob") is not None  # 未被空白锁
+
+    board.create(title="B")  # #2
+    t2 = board.update("2", assignee="\t ")
+    assert t2.assignee is None
+    assert board.claim("2", "carol") is not None
 
 
 def test_task_board_claim_atomic():

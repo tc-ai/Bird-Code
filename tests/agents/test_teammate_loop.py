@@ -802,6 +802,34 @@ async def test_team_manager_reset(tmp_path, monkeypatch):
             await h.join()  # cancel 异步传播,join 等其终止
 
 
+async def test_team_manager_join_all_waits_for_tasks(tmp_path):
+    """F5 回归:cancel_all 后 join_all 把 teammate task 等到 done(其 finally 跑完 worktree cleanup)。
+
+    on_unmount 用 join_all 让 runner.run() finally 内的 shielded cleanup 在 live loop 上跑完;
+    不 await 则关 loop 砍断 cleanup → 留 git-locked worktree。此处验等待语义(isolation 默认
+    None,不建真 worktree;cancel 在 task 首次调度前 pending → 不触达真实 LLM 调用):join_all
+    返回时 handle 已 done,且 join_all 自身不抛(cancel 终态的 CancelledError 被吞)。
+    """
+    from birdcode.agents.teammate import TeamManager
+
+    team = TeamManager()
+    mb: asyncio.Queue = asyncio.Queue()
+    r = SubagentRunner(
+        defn=_defn(), prompt="bob", description="d", tool_use_id="call_join",
+        model_override="", spawn_depth=1, is_async=True,
+        parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
+        parent_registry=None, parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
+        project_root=tmp_path, root=tmp_path, mailbox=mb,
+    )
+    h = await team.spawn("bob", r)
+    team.cancel_all()
+    await team.join_all(timeout=2.0)  # 不抛(cancel 终态被吞)
+    assert h.done()
+
+    # 空 team → 立即返回(无 teammate 时退出路径不阻塞)
+    await TeamManager().join_all(timeout=2.0)
+
+
 def test_reset_preserves_lead_recipient():
     """F1 回归:reset() 保留 lead 注册(teammate→lead 通道在 /clear 后不断)。
 
@@ -858,6 +886,11 @@ async def test_spawn_teammate_tool(tmp_path, monkeypatch):
     assert "冲突" in out3 and "冲突" in out4
     assert "stop" not in team.names() and "view" not in team.names()
 
+    # F11:'lead' 是系统保留名(主 session recipient 预注册占用)→ 拒,给清晰原因(非「已存在」)
+    out5 = await tool.execute(name="lead", prompt="z")
+    assert "保留名" in out5
+    assert "lead" not in team.names()
+
     # 清理:shutdown_all + 等 teammate 终止(worktree 经 finally 清理)
     team.shutdown_all()
     for h in list(team._handles.values()):
@@ -911,24 +944,26 @@ async def test_spawn_teammate_creates_isolated_worktrees(tmp_path, monkeypatch):
         parent_provider=_HistoryRecordingProvider(profile=_cfg().providers["p"]),
         parent_registry=None, parent_gate=None, progress_cb=None,
     )
-    await tool.execute(name="alice", prompt="做 A")
-    await tool.execute(name="bob", prompt="做 B")
+    # 清理放 finally(F12):中途断言失败也要 shutdown 两 teammate,免留 git-locked worktree。
+    try:
+        await tool.execute(name="alice", prompt="做 A")
+        await tool.execute(name="bob", prompt="做 B")
 
-    # 两 teammate 各自 worktree 异步创建 → 轮询直到 .birdcode/worktrees/ 下出现 2 个目录
-    wt_root = tmp_path / ".birdcode" / "worktrees"
-    for _ in range(100):
-        if wt_root.exists() and len(list(wt_root.iterdir())) >= 2:
-            break
-        await asyncio.sleep(0.01)
-    assert wt_root.exists(), "worktree 根目录未创建(isolation=worktree 未生效?)"
-    names = sorted(p.name for p in wt_root.iterdir())
-    assert len(names) == 2, f"两 teammate 应各有独立 worktree,实际: {names}"
-    assert len(set(names)) == 2  # 两个不同 agent_id,互不串
-
-    # 清理:shutdown_all → teammate 终止 → finally 清 worktree
-    team.shutdown_all()
-    for h in list(team._handles.values()):
-        await h.join()
+        # 两 teammate 各自 worktree 异步创建 → 轮询直到 .birdcode/worktrees/ 下出现 2 个目录
+        wt_root = tmp_path / ".birdcode" / "worktrees"
+        for _ in range(100):
+            if wt_root.exists() and len(list(wt_root.iterdir())) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert wt_root.exists(), "worktree 根目录未创建(isolation=worktree 未生效?)"
+        names = sorted(p.name for p in wt_root.iterdir())
+        assert len(names) == 2, f"两 teammate 应各有独立 worktree,实际: {names}"
+        assert len(set(names)) == 2  # 两个不同 agent_id,互不串
+    finally:
+        # 清理:shutdown_all → teammate 终止 → finally 清 worktree
+        team.shutdown_all()
+        for h in list(team._handles.values()):
+            await h.join()
 
 
 async def test_team_manager_teammates_and_handle(tmp_path, monkeypatch):

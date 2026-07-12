@@ -306,10 +306,17 @@ class TurnController:
         teammate 名);不在本处钉回,lead 本轮(run_agent_loop 及其工具调用)会把 SendMessage/
         TaskCreate 的 sender 误归属到该 teammate。显式 set("lead") 只影响本 drain task 的 context
         副本(create_task 拷贝 / submit 的主任务本就是 lead),不污染原 teammate task。
+
+        _AGENT_CWD 同源漏:worktree teammate 在 runner 内 set _AGENT_CWD=<worktree>,经同一
+        create_task 拷贝进本 drain task;不钉回则 lead 本轮的 Git 系统提醒(_resolve_cwd 读
+        _AGENT_CWD)会报 teammate worktree 的分支/脏状态,而非主仓。set(None) 钉回 → _resolve_cwd
+        落 Path.cwd()(lead 主仓),同样只影响本 drain task 的 context 副本。
         """
+        from birdcode.agent.system_prompt.env import _AGENT_CWD
         from birdcode.agents.mailbox import _AGENT_NAME
 
         _AGENT_NAME.set("lead")
+        _AGENT_CWD.set(None)
         try:
             while True:
                 item = self._queue.dequeue_nowait()

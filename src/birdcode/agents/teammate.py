@@ -15,6 +15,9 @@ from dataclasses import dataclass
 from birdcode.agents.mailbox import _AGENT_NAME, MailboxMessage
 from birdcode.agents.runner import _TEAMMATE_SHUTDOWN, SubagentReport, SubagentRunner
 from birdcode.agents.task_board import TaskBoard
+from birdcode.utils.logging import get_logger
+
+log = get_logger("birdcode.agents.teammate")
 
 
 @dataclass
@@ -89,6 +92,8 @@ class TeamManager:
         self._recipients: dict[str, Callable[[MailboxMessage], None]] = {}
         self._handles: dict[str, TeammateHandle] = {}  # name→handle(cancel_all/shutdown_all 用)
         self.task_board: TaskBoard = TaskBoard()  # flat 共享看板(无 Lock,同步原子)
+        # /clear(reset)递增的代次;spawn 时捕获,_on_done 据此丢弃跨会话的陈旧通知(F4)。
+        self._generation: int = 0
 
     def register(self, name: str, deliver: Callable[[MailboxMessage], None]) -> None:
         self._recipients[name] = deliver
@@ -122,8 +127,14 @@ class TeamManager:
         deliver = handle.mailbox.put_nowait  # deliver(msg)=mailbox.put_nowait(msg)
         self.register(name, deliver)
         self._handles[name] = handle
+        gen = self._generation  # 捕获本代次:_on_done 据此丢弃跨 /clear 的陈旧通知(F4)
 
         def _on_done(_t: asyncio.Task[None]) -> None:  # noqa: ARG005 - _t 必需签名
+            # 跨 /clear 陈旧:reset 已 bump 代次并 cancel+清 registry/handles;本回调是旧会话
+            # teammate 的尾音(reset 前刚自然完成、回调滞留 call_soon 队列)→ 整体丢弃,免把旧
+            # 会话的 [teammate 完成] 经「跨 /clear 仍有效的 lead deliver」投进新会话(F4)。
+            if gen != self._generation:
+                return
             # 身份校验避重名误删:仅当 name 仍指向本 teammate 的 deliver/handle 才清。
             if self._recipients.get(name) is deliver:
                 self.unregister(name)
@@ -136,9 +147,13 @@ class TeamManager:
                     report = _t.result()
                     lead_deliver = self._recipients.get("lead")
                     if lead_deliver is not None and report is not None:
+                        # 前缀随 report.status(F6):旧实现恒 "[teammate 完成]",worktree 建失败 /
+                        # 护栏失败等 status='error' 的报告也被当「完成」误导 lead。cancelled 被
+                        # 外层 _t.cancelled() 挡住不会到这;余下仅 completed/error,二元足矣。
+                        tag = "完成" if report.status == "completed" else "出错"
                         lead_deliver(MailboxMessage(
                             sender=name, to="lead",
-                            content=f"[teammate 完成] {getattr(report, 'text', '')[:500]}",
+                            content=f"[teammate {tag}] {getattr(report, 'text', '')[:500]}",
                         ))
                 except Exception:  # noqa: BLE001 - 通知失败不杀 cleanup 路径
                     pass
@@ -156,6 +171,40 @@ class TeamManager:
         for handle in list(self._handles.values()):
             handle.shutdown()
 
+    async def join_all(self, *, timeout: float = 5.0) -> None:
+        """await 所有 teammate task 终止(其 finally 内 shielded worktree cleanup 随之跑完)。
+
+        on_unmount 退出用:cancel_all(或 shutdown_all)发终止信号后调本方法,把每个 teammate
+        task 等到 done。run() 的 finally 已 best-effort await cleanup_subagent_worktree(git
+        unlock/remove/branch-d,含 asyncio.shield),故 task 一旦 done 即等价 cleanup 已尽力跑完
+        ——本方法只需 await 到 done。不 await 则 app 关 loop 时砍断 task → cleanup 中途留
+        git-locked worktree;teammate 的 agent_id 随机,跨会话不复用,create_worktree 的快速恢复
+        只救固定名的 CLI --worktree、救不了 teammate → 每次裸退出累积一批残留。
+
+        带总超时:git 挂/超大仓库致 cleanup 卡住时不阻塞退出,超时退化为 fire-and-forget(等价
+        原 best-effort,不更差)。CancelledError(cancel 正常终态)+ 单 task 异常都不中断其余。
+        """
+        handles = list(self._handles.values())  # 快照(_on_done 并发 pop 不影响迭代)
+        if not handles:
+            return
+
+        async def _drain(h: TeammateHandle) -> None:
+            try:
+                await h.join()
+            except asyncio.CancelledError:
+                pass  # cancel_all/shutdown_all 触发的正常终态
+            except Exception:  # noqa: BLE001 - 退出路径不因单个 teammate 异常中断其余清理
+                pass
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*[_drain(h) for h in handles]), timeout=timeout
+            )
+        except TimeoutError:
+            log.debug(
+                "teammate 清理未在 %.1fs 内全部完成,放弃等待(退化为 best-effort)", timeout
+            )
+
     def reset(self) -> None:
         """新 session 重置(/clear 用):cancel 所有 teammate + 清 registry/board。
 
@@ -167,7 +216,12 @@ class TeamManager:
         若随 registry 一并清掉,teammate→lead 通道会在每次 /clear 后断(SendMessage(to=lead)
         变未知 recipient、teammate 完成通知被丢)。spawn 的 teammate deliver 不保留(其 task
         已被 cancel_all 终止)。
+
+        代次先 bump:本代 teammate 的 _on_done(reset 前刚自然完成、回调尚滞留 call_soon 队列的)
+        见代次不符即整体丢弃,免把旧会话的 [teammate 完成] 经「跨 /clear 仍有效的 lead deliver」
+        投进新会话(F4)。
         """
+        self._generation += 1
         lead_deliver = self._recipients.get("lead")
         self.cancel_all()
         self._recipients.clear()
