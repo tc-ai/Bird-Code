@@ -26,7 +26,8 @@ def format_thinking_done(icons: Icons, *, seconds: int, round_no: int = 0) -> st
 class ThinkingBlock(Static):
     """reasoning 流式展示。默认折叠（仅标题行）；展开看完整文本。"""
 
-    DEFAULT_CSS = "ThinkingBlock { color: $secondary; }"
+    # 橙色(Tokyo Night #ff9e64):原 $secondary=#6b7080 蓝灰在黑底上偏蓝、与背景重合看不清。
+    DEFAULT_CSS = "ThinkingBlock { color: #ff9e64; }"
 
     def __init__(self, icons: Icons, *, round_no: int = 0) -> None:
         # markup=False:思考正文(模型 reasoning)可能含 [..](如代码片段 [TextBlock]),

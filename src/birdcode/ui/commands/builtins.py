@@ -162,7 +162,7 @@ async def _compact(ctx: CommandContext, _args: str) -> None:
         await ctx.show_message("/compact 需启用会话持久化(当前无 store/配置)", kind="warn")
         return
     if status == "empty" or res is None:
-        await ctx.show_message("/compact:无可压缩内容(会话为空?)")
+        await ctx.show_message("/compact:无可压缩内容")
         return
     fallback = "(硬截断兜底)" if res.fell_back else ""
     msg = f"已压缩({res.trigger}):{res.pre_tokens}→{res.post_tokens} token".rstrip()

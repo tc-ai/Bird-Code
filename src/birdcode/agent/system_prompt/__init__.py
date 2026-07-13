@@ -69,6 +69,9 @@ async def build_system_reminder(
     cwd 经 _resolve_cwd:worktree 子 agent → 其 worktree dir(_AGENT_CWD);否则 Path.cwd()。
     """
     body = await gather_dynamic_env(registry=registry, memory=memory)
+    if not subagent:
+        # 主 agent:鼓励用子 agent 分担独立子任务(并行、隔离工作目录)。
+        body += "\n任务复杂？可以尝试使用子 agent 工具来帮你完成任务。"
     if subagent:
         cwd = _resolve_cwd(None)
         body += (

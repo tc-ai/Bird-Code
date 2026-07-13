@@ -29,7 +29,7 @@ class _CountingCtx:
         self.calls = 0
         self.react_calls = 0
 
-    async def maybe_compact(self, *, history, current, last_in):  # type: ignore[no-untyped-def]
+    async def maybe_compact(self, *, history, current, last_in, on_activity=None):  # type: ignore[no-untyped-def]
         self.calls += 1
         return None
 

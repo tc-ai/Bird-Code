@@ -37,8 +37,27 @@ def _lexer_for_path(path: str) -> str | None:
         return None
 
 
+_TOOL_ARG_PREVIEW_MAX = 60  # 运行行参数预览上限(字符);超长截断,避免多行 JSON 撑爆行
+
+
+def _preview_args(args: str, *, max_len: int = _TOOL_ARG_PREVIEW_MAX) -> str:
+    """工具调用参数的单行预览:折叠空白(含字面 \\n/\\t 转义)+ 截断。
+
+    原 args 是原始 JSON 串(explore/prompt 等含大段换行文本)→ 直接拼进运行行会撑成多行、
+    极难看。此处压成单行并截断,保留简短预览(如 read_file 的路径)。
+    """
+    if not args:
+        return ""
+    flat = args.replace("\\n", " ").replace("\\t", " ")
+    flat = " ".join(flat.split())
+    if len(flat) <= max_len:
+        return flat
+    return flat[:max_len] + "…"
+
+
 def format_tool_running(name: str, args: str, frame: str) -> str:
-    return f"{frame} {name}({args})"
+    preview = _preview_args(args)
+    return f"{frame} {name}({preview})" if preview else f"{frame} {name}"
 
 
 class ToolLine(Static):
@@ -48,12 +67,16 @@ class ToolLine(Static):
     # 若用 $success(绿),Read 回来的整篇文件内容会全绿、难读。状态行靠 ⎿ ✓ 图标区分。
     DEFAULT_CSS = "ToolLine { color: $text; }"
 
-    def __init__(self, icons: Icons) -> None:
+    def __init__(self, icons: Icons, *, color: str | None = None) -> None:
         # markup=False:工具输出(文件内容)含 [TextBlock(...)] 这类方括号。Rich 的 escape
         # 只转义 [小写tag] 形式(漏掉大写/含括号的如 [TextBlock(..)]),仍会 MarkupError 崩溃;
         # 在 widget 级直接关闭 markup 解析最稳妥(update 渲染纯文本)。
         super().__init__(markup=False)
         self._icons = icons
+        # color 非空时,运行转圈行 + 收尾 head 均用此色(自动压缩橙色提示复用本 widget)。
+        self._color: str | None = color
+        # label 非空时,运行行显示「{spinner} {label}」(替代默认「{spinner} name(args)」)。
+        self._label: str | None = None
         self._name: str = ""
         self._args: str = ""
         self._frame: int = 0
@@ -76,8 +99,9 @@ class ToolLine(Static):
 
     # ---- 现有契约(不变)----
 
-    def start(self, name: str, args: str) -> None:
+    def start(self, name: str = "", args: str = "", *, label: str | None = None) -> None:
         self._name, self._args = name, args
+        self._label = label
         self._frame = 0
         self._render_running()
         self._timer = self.set_interval(0.12, self._tick)
@@ -86,8 +110,17 @@ class ToolLine(Static):
         self._frame = (self._frame + 1) % len(self._icons.spinner)
         self._render_running()
 
+    def _running_renderable(self) -> RenderableType:
+        frame = self._icons.spinner[self._frame]
+        body = (
+            f"{frame} {self._label}"
+            if self._label is not None
+            else format_tool_running(self._name, self._args, frame)
+        )
+        return Text(body, style=self._color) if self._color else body
+
     def _render_running(self) -> None:
-        self.update(format_tool_running(self._name, self._args, self._icons.spinner[self._frame]))
+        self.update(self._running_renderable())
 
     def finish(self, ok: bool, summary: str, *, truncated: bool = False) -> None:
         self._truncated = truncated
@@ -186,8 +219,9 @@ class ToolLine(Static):
         并入此 Group,不再 self.mount 子区——Static 非容器,mount 子区曾致 Write 工具行
         「一闪而过」。
         """
-        # 成功绿 / 失败红:失败时绿底 ✗ 会让人误判成成功
-        head = Text(self._render_head(), style="red" if not self._last_ok else "green")
+        # 成功绿 / 失败红:失败时绿底 ✗ 会让人误判成成功;color 覆盖(压缩橙色提示)优先。
+        head_style = self._color or ("red" if not self._last_ok else "green")
+        head = Text(self._render_head(), style=head_style)
         if not (self._has_output or self._diff_syntax is not None):
             return Group(head)
         if not self._expanded:

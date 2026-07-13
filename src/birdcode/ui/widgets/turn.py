@@ -17,7 +17,9 @@ from birdcode.ui.widgets.tool_line import ToolLine
 class Turn(Container):
     DEFAULT_CSS = """
     Turn { padding: 0; height: auto; }
-    Turn .user { color: $primary; }
+    /* 用户消息用紫色(Tokyo Night #bb9af7):原 $primary=#7aa2f7 蓝在黑底上与背景重合看不清。 */
+    /* light 主题在 app.py 用 .light Turn .user 覆盖回蓝(#2e5cd6,白底上高对比)。 */
+    Turn .user { color: #bb9af7; }
     """
 
     def __init__(self) -> None:
@@ -35,7 +37,7 @@ class Turn(Container):
         await self.mount(md)
         return md
 
-    async def add_tool(self, icons: Icons) -> ToolLine:
-        tool = ToolLine(icons)
+    async def add_tool(self, icons: Icons, *, color: str | None = None) -> ToolLine:
+        tool = ToolLine(icons, color=color)
         await self.mount(tool)
         return tool

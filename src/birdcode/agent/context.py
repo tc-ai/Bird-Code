@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -41,6 +42,12 @@ class CompactionResult:
     boundary_uuid: str
     summary_uuid: str
     fell_back: bool  # 是否走了硬截断兜底(摘要失败/超限应急)
+
+
+# 压缩活动回调:phase ∈ {"start","end"}。start 时 result=None;end 时 result 为本次结果
+# (可能 None:prefix 为空等提前返回不会触发本回调;正常结束 result 非 None)。
+# 供 agent_loop 桥接成 CompactionStart/CompactionEnd 事件 → UI 橙色转圈。
+CompactActivity = Callable[[str, "CompactionResult | None"], Awaitable[None]]
 
 
 def _is_cjk(ch: str) -> bool:
@@ -300,10 +307,14 @@ class ContextManager:
         history: list[Turn],
         current: list[Message],
         last_in: int | None,
+        on_activity: CompactActivity | None = None,
     ) -> CompactionResult | None:
         """每轮 stream 前调。超阈值 → Autocompact(摘要);未超 → None。
 
         摘要连续失败 _MAX_SUMMARY_FAILURES 次 → 硬截断兜底(保留调用方 trigger、fell_back=True)。
+
+        on_activity:压缩真正开始/结束时回调(供 UI 转圈)。仅在实际摘要路径触发;
+        未超阈值直接 return None 时不触发。
         """
         # 刚压缩/react/resume 后 last_in 陈旧(= 截断前的大 input),直接用会误触发。
         # _stale_anchor 置位时改走冷启动估(消费后清零,下一轮回归真 last_in)。
@@ -312,7 +323,9 @@ class ContextManager:
         est = self._est.estimate(history=history, current=current, last_in=last_in_eff)
         if est < self._cfg.autocompact_threshold:
             return None
-        return await self._compact(history, trigger="auto", pre_tokens=est)
+        return await self._compact(
+            history, trigger="auto", pre_tokens=est, on_activity=on_activity
+        )
 
     async def compact_now(
         self, *, history: list[Turn], trigger: str = "manual"
@@ -329,66 +342,85 @@ class ContextManager:
         return await self._hard_truncate(history, trigger="reactive")
 
     async def _compact(
-        self, history: list[Turn], *, trigger: str, pre_tokens: int
+        self,
+        history: list[Turn],
+        *,
+        trigger: str,
+        pre_tokens: int,
+        on_activity: CompactActivity | None = None,
     ) -> CompactionResult | None:
         """Autocompact 主体:切 prefix/tail → 试摘要(最多 3 次,指数退避)→ 成功则原地替换。
 
-        prefix 为空(没东西可摘要)→ 返回 None。
+        prefix 为空(没东西可摘要)→ 返回 None(不触发 on_activity)。
         摘要连续失败 _MAX_SUMMARY_FAILURES 次 → 走 _hard_truncate 兜底(fell_back=True)。
+        on_activity:真正开始摘要时触发 "start",结束时(含熔断兜底)触发 "end" + result。
         """
         prefix, tail = self._split_prefix_tail(history)
         if not prefix:  # 尾段即全部(单 turn 巨大 / 会话小)→ 没东西可摘要
             log.info("compact:无可摘要的前段(尾段即全部),跳过")
             return None  # 不写假边界;react 走 _hard_truncate、不经此分支
 
-        summary_text: str | None = None
-        for attempt in range(_MAX_SUMMARY_FAILURES):
-            try:
-                raw = await self._provider.complete(
-                    self._summary_system(),
-                    self._render_prefix_for_summary(prefix),
-                    max_tokens=self._cfg.compact_summary_reserve,
-                )
-                summary_text = self._extract_summary(raw)
-                if summary_text is not None:
-                    break
-                # 提取失败给诊断(可能 reserve 不足致 </summary> 未闭合,或模型未产标签)
-                log.warning("summary 提取失败(无 <summary> 标签;可能 compact_summary_reserve 过小)")
-            except Exception:  # noqa: BLE001 - 摘要失败不杀主循环,计数熔断
-                log.warning(
-                    "summary 调用失败,将重试(达 %d 次熔断)", _MAX_SUMMARY_FAILURES, exc_info=True
-                )
-            # 重试前指数退避(仅当还会重试),避免瞬时错误(429/超时)连续 3 次后硬截断
-            if summary_text is None and attempt < _MAX_SUMMARY_FAILURES - 1:
-                await asyncio.sleep(_BACKOFF_BASE * (2**attempt))
+        if on_activity is not None:
+            await on_activity("start", None)
+        result: CompactionResult | None = None
+        try:
+            summary_text: str | None = None
+            for attempt in range(_MAX_SUMMARY_FAILURES):
+                try:
+                    raw = await self._provider.complete(
+                        self._summary_system(),
+                        self._render_prefix_for_summary(prefix),
+                        max_tokens=self._cfg.compact_summary_reserve,
+                    )
+                    summary_text = self._extract_summary(raw)
+                    if summary_text is not None:
+                        break
+                    # 提取失败给诊断(可能 reserve 不足致 </summary> 未闭合,或模型未产标签)
+                    log.warning(
+                        "summary 提取失败(无 <summary> 标签;可能 reserve 过小)"
+                    )
+                except Exception:  # noqa: BLE001 - 摘要失败不杀主循环,计数熔断
+                    log.warning(
+                        "summary 调用失败,将重试(达 %d 次熔断)",
+                        _MAX_SUMMARY_FAILURES,
+                        exc_info=True,
+                    )
+                # 重试前指数退避(仅当还会重试),避免瞬时错误(429/超时)连续 3 次后硬截断
+                if summary_text is None and attempt < _MAX_SUMMARY_FAILURES - 1:
+                    await asyncio.sleep(_BACKOFF_BASE * (2**attempt))
 
-        if summary_text is None:
-            log.warning("summary 连续失败 %d 次,熔断 → 硬截断兜底", _MAX_SUMMARY_FAILURES)
-            # 保留调用方 trigger(manual/auto),用 fell_back=True 标识走了兜底
-            return await self._hard_truncate(history, trigger=trigger)
+            if summary_text is None:
+                log.warning("summary 连续失败 %d 次,熔断 → 硬截断兜底", _MAX_SUMMARY_FAILURES)
+                # 保留调用方 trigger(manual/auto),用 fell_back=True 标识走了兜底
+                result = await self._hard_truncate(history, trigger=trigger)
+                return result
 
-        # 成功:持久化(含重写尾段)+ 原地替换 history = [摘要Turn, *tail]
-        logical_parent = self._tail_head_or_none(prefix)
-        post_tokens = self._est.estimate(history=tail, current=[], last_in=None)
-        boundary_uuid, summary_uuid = await self._persist_compaction(
-            trigger=trigger,
-            pre_tokens=pre_tokens,
-            post_tokens=post_tokens,
-            summary_text=summary_text,
-            logical_parent_uuid=logical_parent,
-            tail_turns=tail,
-        )
-        summary_turn = Turn(messages=[self._build_summary_message(summary_text)])
-        history[:] = [summary_turn, *tail]  # 原地替换(调用方 list 可见)
-        self._stale_anchor = True  # history 刚变,旧 last_in 失效 → 下次冷启动估
-        return CompactionResult(
-            trigger=trigger,
-            pre_tokens=pre_tokens,
-            post_tokens=self._est.estimate(history=history, current=[], last_in=None),
-            boundary_uuid=boundary_uuid,
-            summary_uuid=summary_uuid,
-            fell_back=False,
-        )
+            # 成功:持久化(含重写尾段)+ 原地替换 history = [摘要Turn, *tail]
+            logical_parent = self._tail_head_or_none(prefix)
+            post_tokens = self._est.estimate(history=tail, current=[], last_in=None)
+            boundary_uuid, summary_uuid = await self._persist_compaction(
+                trigger=trigger,
+                pre_tokens=pre_tokens,
+                post_tokens=post_tokens,
+                summary_text=summary_text,
+                logical_parent_uuid=logical_parent,
+                tail_turns=tail,
+            )
+            summary_turn = Turn(messages=[self._build_summary_message(summary_text)])
+            history[:] = [summary_turn, *tail]  # 原地替换(调用方 list 可见)
+            self._stale_anchor = True  # history 刚变,旧 last_in 失效 → 下次冷启动估
+            result = CompactionResult(
+                trigger=trigger,
+                pre_tokens=pre_tokens,
+                post_tokens=self._est.estimate(history=history, current=[], last_in=None),
+                boundary_uuid=boundary_uuid,
+                summary_uuid=summary_uuid,
+                fell_back=False,
+            )
+            return result
+        finally:
+            if on_activity is not None:
+                await on_activity("end", result)
 
     async def _hard_truncate(self, history: list[Turn], *, trigger: str) -> CompactionResult:
         """兜底:丢掉 tail 之前的全部(不调 LLM、必成功),history 原地替换为 tail。

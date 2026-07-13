@@ -85,6 +85,26 @@ class EditDiff(BaseModel):
     new: str
 
 
+class CompactionStart(BaseModel):
+    """自动压缩开始:UI 挂一条橙色转圈行(仿工具调用)。
+
+    由 agent_loop 在 ContextManager 真正开始摘要(超阈值)时 emit;
+    manual /compact 不走事件流(由命令自身提示)。
+    """
+
+    type: Literal["compaction_start"] = "compaction_start"
+    reason: str = "auto"  # "auto" | "manual" | "reactive"
+
+
+class CompactionEnd(BaseModel):
+    """自动压缩结束:停转圈、显示压缩结果摘要(橙色)。"""
+
+    type: Literal["compaction_end"] = "compaction_end"
+    reason: str = "auto"
+    summary: str = ""  # 给 UI 展示的收尾文本,如 "已压缩 32000→8000 token"
+    fell_back: bool = False  # 是否走了硬截断兜底(摘要失败/超限)
+
+
 ProviderEvent = Annotated[
     TurnStart
     | TextDelta
@@ -94,7 +114,9 @@ ProviderEvent = Annotated[
     | Done
     | Error
     | Interrupted
-    | EditDiff,
+    | EditDiff
+    | CompactionStart
+    | CompactionEnd,
     Field(discriminator="type"),
 ]
 

@@ -33,7 +33,7 @@ async def test_on_event_edit_diff_calls_set_diff():
 
 @pytest.mark.asyncio
 async def test_shift_tab_cycles_mode():
-    """shift+tab 绑定(priority)抢占焦点逆向导航,循环切档 plan→default→...→bypass→plan。
+    """shift+tab 绑定(priority)抢占焦点逆向导航,循环切档 default→plan→accept-edits→bypass→default。
 
     已用一次性探针确认 pilot.press('shift+tab') 在本环境触发 action_cycle_mode。
     """
@@ -42,16 +42,16 @@ async def test_shift_tab_cycles_mode():
         assert app.mode == "default"  # 起点(默认档)
         await pilot.press("shift+tab")
         await pilot.pause()
-        assert app.mode == "accept-edits"  # default → accept-edits
+        assert app.mode == "plan"  # default → plan
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert app.mode == "accept-edits"  # plan → accept-edits
         await pilot.press("shift+tab")
         await pilot.pause()
         assert app.mode == "bypass"  # accept-edits → bypass
         await pilot.press("shift+tab")
         await pilot.pause()
-        assert app.mode == "plan"  # bypass → plan(回绕)
-        await pilot.press("shift+tab")
-        await pilot.pause()
-        assert app.mode == "default"  # plan → default(回绕到起点)
+        assert app.mode == "default"  # bypass → default(回绕到起点)
 
 
 class _DummyProvider:

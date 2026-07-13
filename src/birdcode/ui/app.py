@@ -14,6 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -22,7 +23,10 @@ from textual.reactive import reactive
 from textual.timer import Timer
 from textual.widgets import Markdown, Static, TextArea
 
+from birdcode import __version__
 from birdcode.agent.provider import (
+    CompactionEnd,
+    CompactionStart,
     Done,
     EditDiff,
     Error,
@@ -40,7 +44,7 @@ from birdcode.blocks import TextBlock
 from birdcode.conversation import Message, TurnController
 from birdcode.permission.gate import ModalResult, Mode
 from birdcode.ui.icons import select_icons
-from birdcode.ui.pure import parse_command, shorten_path
+from birdcode.ui.pure import parse_command
 from birdcode.ui.theme import get_theme, supports_unicode
 from birdcode.ui.widgets.input_area import InputArea
 from birdcode.ui.widgets.separator import Separator
@@ -77,7 +81,10 @@ if TYPE_CHECKING:
 
 log = get_logger("birdcode.tui")
 
-_BANNER = "birdcode · 回车发送，行尾 \\ 换行，/help 查看，Esc 中断，Ctrl+Q 退出，Ctrl+C 复制"
+# 顶端 banner 左侧的小鸟 ASCII 图(鸣鸟:冠羽 ▟▛ + 尾翼 ▛▘ + 右喙 >),契合项目名 BirdCode。
+# 三行图,右侧对齐版本/模型/路径(仿 Claude Code)。_BIRD_ASCII 为无 Unicode 终端的回退。
+_BIRD_UNICODE = ("  ▟▛██▙>", " ▟█████▛▘", "  ▘▘ ▝▝")
+_BIRD_ASCII = ("  (o>", "  //\\", "  ^^")
 
 
 def _read_sidechain_final_text(path: Path) -> str | None:
@@ -164,7 +171,7 @@ class BirdApp(App[None]):
     CSS = """
     Screen { background: $background; color: $text; }
     #scroll { height: 1fr; scrollbar-gutter: stable; }
-    #banner { color: $secondary; margin: 0 0 1 0; }
+    #banner { color: #e6e6e6; margin: 0 0 1 0; }
     #composer { height: auto; }
     Screen.light { background: #f6f8fa; color: #1f2328; }
     .light #banner { color: #707088; }
@@ -172,6 +179,7 @@ class BirdApp(App[None]):
     .light ToolLine { color: #1f2328; }
     .light Separator { color: #d0d7de; }
     .light Turn .user { color: #2e5cd6; }
+    .light ThinkingBlock { color: #9a6700; }
     """
 
     # 中断/退出改由 Esc / Ctrl+Q 负责；Ctrl+C、Ctrl+V 放行给 Textual 内建的
@@ -182,6 +190,9 @@ class BirdApp(App[None]):
         # shift+tab 循环切换模式(plan→default→accept-edits→bypass);priority 抢占
         # 焦点逆向导航(Textual 默认 shift+tab=focus_previous)。
         Binding("shift+tab", "cycle_mode", show=False, priority=True),
+        # shift+c 复制:非 priority → 输入框聚焦时 TextArea 先插入 'C'(action_copy 见输入框
+        # 聚焦即 no-op),不抢键;焦点在 transcript 等处时才真正复制(走 OSC 52)。
+        Binding("shift+c", "copy", show=False),
     ]
 
     model = reactive("mock")
@@ -242,11 +253,13 @@ class BirdApp(App[None]):
         self._theme = get_theme(theme_name)
         self._unicode = supports_unicode()
         self._icons = select_icons(unicode_supported=self._unicode)
-        self.cwd = shorten_path(str(Path.cwd()))
+        self.cwd = str(Path.cwd())  # 绝对路径(banner 显示完整路径,不再 shorten)
         self._md: Markdown | None = None
         self._md_stream: MarkdownStream | None = None
         self._tools: dict[str, ToolLine] = {}
         self._diff_pending: dict[str, ToolLine] = {}  # stage4:ToolResult→EditDiff 之间暂存 ToolLine
+        # 自动压缩的橙色转圈行(CompactionStart 挂、CompactionEnd/Interrupted 收)。
+        self._compaction_line: ToolLine | None = None
         # 同步子 agent 进度卡:agent_id→卡(首次 progress mount,后续 update;Done 统一清理)
         self._subagent_cards: dict[str, SubagentCard] = {}
         self._thinking: ThinkingBlock | None = None
@@ -368,7 +381,7 @@ class BirdApp(App[None]):
         # 锚点)不再随滚动/流式漂移；#scroll 只放 banner 与各轮对话（Claude Code 式：
         # 上方滚动历史、底部固定输入）。
         with TranscriptScroll(id="scroll"):
-            yield Static(_BANNER, id="banner")
+            yield Static(self._build_banner(), id="banner", markup=False)
         with Container(id="composer"):
             yield Separator(char="─" if self._unicode else "-")
             yield InputArea(id="input")
@@ -795,16 +808,53 @@ class BirdApp(App[None]):
     def _refresh_status(self) -> None:
         try:
             self.query_one("#status", StatusBar).refresh_from(
-                model=self.model,
                 mode=self.mode,
-                cwd=self.cwd,
-                usage=self.usage,
-                queue_size=self.queue_size,
-                busy=self.busy,
                 unicode_supported=self._unicode,
+                queue_size=self.queue_size,
             )
         except Exception:
             pass
+
+    def _display_model(self) -> str:
+        """banner 显示的模型:取 profile.model(真实 id,如 deepseek-v4-pro);
+        profile 缺失(无 cfg / mock 启动)退化为 profile 名(self.model)。"""
+        if self._cfg is not None:
+            prof = self._cfg.providers.get(self.model)
+            if prof is not None:
+                return prof.model
+        return self.model
+
+    def _build_banner(self) -> Text:
+        """顶端 banner:小鸟图(着色)+ BirdCode vX.X.X / 当前模型 / 当前路径。
+
+        图行用主题 accent 色(金/黄,呼应「鸟」);三行文字继承 #banner 的 $secondary。
+        /profile 切模型、cwd 变更后由 watch_model/watch_cwd → _refresh_banner 重绘。
+        """
+        art = _BIRD_UNICODE if self._unicode else _BIRD_ASCII
+        right = [f"BirdCode v{__version__}", self._display_model(), self.cwd]
+        width = max(len(a) for a in art)
+        art_style = self._theme.design.get("accent") or "yellow"
+        out = Text()
+        for i, (a, t) in enumerate(zip(art, right, strict=True)):
+            out.append(Text(a.ljust(width), style=art_style))
+            out.append("  ")
+            out.append(t)
+            if i < len(art) - 1:
+                out.append("\n")
+        return out
+
+    def _refresh_banner(self) -> None:
+        try:
+            self.query_one("#banner", Static).update(self._build_banner())
+        except Exception:
+            pass
+
+    def watch_model(self, _model: str) -> None:
+        # /profile 切模型 → 重绘 banner(状态行不再显示模型)。
+        self._refresh_banner()
+
+    def watch_cwd(self, _cwd: str) -> None:
+        self._refresh_banner()
 
     async def show_message(self, text: str, *, kind: str = "info") -> None:
         """命令输出统一入口:挂一条 Static 到 #scroll。kind=warn/error 前缀 ⚠。"""
@@ -1128,6 +1178,26 @@ class BirdApp(App[None]):
             line = self._diff_pending.pop(event.id, None)
             if line is not None:
                 line.set_diff(event.old, event.new)
+        elif isinstance(event, CompactionStart):
+            # 自动压缩:挂一条橙色转圈行(仿工具调用,复用 ToolLine 的 spinner/收尾)。
+            # 挂到当前轮次下(TurnStart 已先于 agent_loop 发出 → _current_turn 通常存在)。
+            turn = self._current_turn
+            if turn is None:
+                turn = Turn()
+                await scroll.mount(turn)
+                self._current_turn = turn
+            line = await turn.add_tool(self._icons, color="dark_orange")
+            line.start(label="上下文空间不足，正在进行压缩")
+            self._compaction_line = line
+        elif isinstance(event, CompactionEnd):
+            # 压缩结束:停转圈、显示结果摘要(橙色)。fell_back 标硬截断兜底。
+            line = self._compaction_line
+            if line is not None:
+                summary = event.summary or "压缩完成"
+                if event.fell_back:
+                    summary = f"{summary}（硬截断兜底）"
+                line.finish(ok=True, summary=summary)
+                self._compaction_line = None
         elif isinstance(event, Done):
             if event.usage is not None:
                 self.usage = event.usage
@@ -1148,6 +1218,10 @@ class BirdApp(App[None]):
             for line in self._tools.values():
                 line.finish(ok=False, summary="⚡ 中断")
             self._tools.clear()
+            # 自动压缩转圈行同样没机会收到 CompactionEnd → 主动收尾,免得中断后仍转。
+            if self._compaction_line is not None:
+                self._compaction_line.finish(ok=False, summary="⚡ 中断")
+                self._compaction_line = None
             # 同步子 agent 运行中被 Esc 中断:卡片随轮次结束清理(与 Done/Error 同)。
             self._clear_subagent_cards()
             await scroll.mount(Static("[interrupted]", classes="turn"))
@@ -1302,13 +1376,28 @@ class BirdApp(App[None]):
         if self._permission_prompt is not None:
             self._permission_prompt.choose("session")
             return
-        order = ["plan", "default", "accept-edits", "bypass"]
+        # 循环顺序:default→plan→accept-edits→bypass→default(plan 最安全,bypass 最危险)。
+        order = ["default", "plan", "accept-edits", "bypass"]
         try:
             i = order.index(self.mode)
         except ValueError:
-            i = 1  # 兜底:异常值落到 default 之后(下一档 accept-edits)
+            i = 1  # 兜底:异常值落到 default 之后(下一档 plan)
         self.mode = order[(i + 1) % len(order)]
         self._refresh_status()
+
+    def action_copy(self) -> None:
+        """shift+c 复制:输入框聚焦时 no-op(让 TextArea 正常插入大写 C,不抢键);
+        焦点在 transcript 等处时委托 screen.copy_text(走 OSC 52)复制选区。
+        """
+        # 非优先级绑定 → 输入框聚焦时 TextArea 已先插入 'C';这里再见聚焦态 no-op,双保险。
+        if isinstance(self.focused, InputArea):
+            return
+        copy = getattr(self.screen, "copy_text", None)
+        if callable(copy):
+            try:
+                copy()
+            except Exception:
+                log.debug("shift+c 复制失败", exc_info=True)
 
     def _at_bottom(self) -> bool:
         """当前视图是否贴在底部（用于决定新内容是否跟随滚动）。"""
