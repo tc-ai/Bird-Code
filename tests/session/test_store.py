@@ -399,16 +399,53 @@ async def test_load_mainline_tolerates_missing_parent_uuid(tmp_path):
 
 
 async def test_list_sessions_skips_empty_jsonl(tmp_path):
-    """F13:0 字节 jsonl(由 __init__ 的 open('a') 创建)不被 list_sessions 收录。"""
-    d = tmp_path / paths.encode_cwd(tmp_path)
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "empty.jsonl").touch()  # 0 字节文件
+    """F13:0 字节 jsonl 不被 list_sessions 收录。
+
+    __init__ 已不再创建空文件(惰性 open),故手工 touch 一个,且造在 store 构造之后
+    (免被 _purge_empty_sessions 清掉),紧接 list_sessions 前造 → 验证 list 层的排除。
+    """
     # 一个有内容的对照会话
     s1 = SessionStore(_ctx("s1"), tmp_path, root=tmp_path)
     await s1.append(Message(role="user", content=[TextBlock(text="提问")]))
     s1.close()
+    d = tmp_path / paths.encode_cwd(tmp_path)
+    (d / "empty.jsonl").touch()  # 0 字节文件(造在 list_sessions 前,不被 purge 清)
     summaries = SessionStore.list_sessions(tmp_path, tmp_path)
-    assert [s.session_id for s in summaries] == ["s1"]
+    assert [s.session_id for s in summaries] == ["s1"]  # empty 被跳过
+
+
+async def test_empty_session_creates_no_jsonl(tmp_path):
+    """启动即退出、无任何内容 → 不落 jsonl(不残留 0kb 文件)。
+
+    构造后未 append 前、close 之后,文件均不应存在(惰性 open:首次写入才建文件)。
+    """
+    store = SessionStore(_ctx("e1"), tmp_path, root=tmp_path)
+    assert not store._jsonl.exists()  # noqa: SLF001 - 未写入,无文件
+    store.close()
+    assert not store._jsonl.exists()  # noqa: SLF001 - close 后仍无文件
+
+
+async def test_close_deletes_zero_byte_jsonl(tmp_path):
+    """兜底:若本会话 jsonl 为 0 字节(异常遗留),close 时删掉,不留 0kb。"""
+    store = SessionStore(_ctx("z1"), tmp_path, root=tmp_path)
+    # 手工造一个 0 字节同名文件(模拟异常遗留/旧版占位),不经 append。
+    store._jsonl.parent.mkdir(parents=True, exist_ok=True)  # noqa: SLF001
+    store._jsonl.touch()  # noqa: SLF001
+    assert store._jsonl.exists()  # noqa: SLF001
+    store.close()
+    assert not store._jsonl.exists()  # noqa: SLF001 - close 删空文件
+
+
+async def test_purge_empty_sessions_removes_legacy_zero_byte(tmp_path):
+    """遗留的 0kb jsonl 在新 store 构造时被清扫(_purge_empty_sessions)。"""
+    d = tmp_path / paths.encode_cwd(tmp_path)
+    d.mkdir(parents=True, exist_ok=True)
+    legacy = d / "stale.jsonl"
+    legacy.touch()  # 遗留 0kb
+    # 构造任意一个 store → 触发清扫本项目目录
+    s = SessionStore(_ctx("x"), tmp_path, root=tmp_path)
+    s.close()
+    assert not legacy.exists()
 
 
 # ---- #2: 修复持久化,再 resume 稳定 ----

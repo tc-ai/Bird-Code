@@ -186,12 +186,45 @@ class SessionStore:
         self._tool_results = paths.tool_results_dir(
             self._root, ctx.session_id, project_root, worktree_name=self._worktree_name
         )
-        self._jsonl.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = self._jsonl.open("a", encoding="utf-8")
+        # 惰性打开:不在构造时建目录/文件 → 空会话(启动即 Ctrl+Q、无任何内容)不落 0kb jsonl。
+        # 首次写入经 _fh property 才 mkdir+open('a')。close()/各 append 均经 self._fh 取句柄。
+        self._fh_io: IO[str] | None = None
         self._last_uuid: str | None = None
+        # 启动时清扫本项目目录下遗留的 0kb 空会话(旧版 __init__ 曾 open('a') 占位创建)。
+        # 0kb 文件无内容、list_sessions 本就忽略,删除安全(含并发会话:0kb 即未写入,无可丢内容)。
+        self._purge_empty_sessions()
 
     def as_output_sink(self) -> OutputSink:
         return OutputSink(self)
+
+    @property
+    def _fh(self) -> IO[str]:
+        """惰性打开 jsonl 句柄:首次写入才 mkdir + open('a')。
+
+        空会话(从未 append)→ 永不建文件,不留 0kb jsonl。各 append/append_compaction
+        均经 self._fh 取句柄;close() 直读 _fh_io(避免在此触发建文件)。
+        """
+        if self._fh_io is None:
+            self._jsonl.parent.mkdir(parents=True, exist_ok=True)
+            self._fh_io = self._jsonl.open("a", encoding="utf-8")
+        return self._fh_io
+
+    def _purge_empty_sessions(self) -> None:
+        """清扫本项目会话目录下的 0kb jsonl(遗留空会话)。best-effort,失败只 log。"""
+        d = paths.sessions_dir(
+            self._root, self._project_root, worktree_name=self._worktree_name
+        )
+        if not d.exists():
+            return
+        try:
+            for jf in d.glob("*.jsonl"):
+                try:
+                    if jf.stat().st_size <= 0:
+                        jf.unlink()
+                except OSError:
+                    log.debug("删除空会话 %s 失败", jf, exc_info=True)
+        except OSError:
+            log.debug("purge empty sessions 失败", exc_info=True)
 
     @property
     def tool_results_dir(self) -> Path:
@@ -591,7 +624,16 @@ class SessionStore:
         )
 
     def close(self) -> None:
+        # 直读 _fh_io(而非 self._fh property)→ 空会话不会因 close 触发建文件。
+        if self._fh_io is not None:
+            try:
+                self._fh_io.close()
+            except Exception:
+                pass
+            self._fh_io = None
+        # 兜底:本会话 jsonl 若仍为空(从未写入,或异常遗留)→ 删掉,不留 0kb。
         try:
-            self._fh.close()
-        except Exception:
-            pass
+            if self._jsonl.exists() and self._jsonl.stat().st_size <= 0:
+                self._jsonl.unlink()
+        except OSError:
+            log.debug("close 删除空 jsonl 失败", exc_info=True)
