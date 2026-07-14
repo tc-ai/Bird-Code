@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from birdcode.conversation import Turn as ConversationTurn
     from birdcode.mcp.client import McpManager
     from birdcode.memory.extractor import MemoryManager
+    from birdcode.memory.governance import GovernanceManager
     from birdcode.permission.gate import UiPermissionGate
     from birdcode.session.models import SessionContext
     from birdcode.session.store import SessionStore
@@ -214,6 +215,7 @@ class BirdApp(App[None]):
         resume: bool = False,
         project_instructions: str = "",
         memory: MemoryManager | None = None,
+        governance: GovernanceManager | None = None,
         command_registry: CommandRegistry | None = None,
     ) -> None:
         super().__init__()
@@ -241,6 +243,7 @@ class BirdApp(App[None]):
         # /context 用此副本(无需经 cfg);真实 provider 走 cfg.project_instructions。
         self._project_instructions = project_instructions
         self._memory = memory
+        self._governance = governance
         if command_registry is None:
             from birdcode.ui.commands.builtins import build_builtin_registry
 
@@ -452,6 +455,7 @@ class BirdApp(App[None]):
             store=self._store,
             context=context,
             memory=self._memory,
+            governance=self._governance,
         )
         # MCP:构造 manager + 启动(隔离 per-server 失败)+ 注册 tool_search 常驻工具。
         # 外层 try 兜底任何意外异常(理论上 startup 内已隔离,但防御性双保险):
@@ -1093,6 +1097,21 @@ class BirdApp(App[None]):
             self.controller._memory = self._memory  # noqa: SLF001
         else:
             self._memory.set_provider(new_provider, extract_model=extract_model)
+        # 记忆治理同 memory:mock→real 时 _governance 还是 None,补构造并挂 controller;
+        # 已有则跟 provider 切换。与 _memory 同步构造(cli 启动处),故此处 find_project_root
+        # 已由上方 memory 分支 import 到作用域。
+        if self._governance is None:
+            from birdcode.memory.governance import GovernanceManager
+
+            self._governance = GovernanceManager(
+                new_provider,
+                project_root=self._cfg.project_root or find_project_root(),
+                govern_model=extract_model,
+                session_store=self._store,
+            )
+            self.controller._governance = self._governance  # noqa: SLF001
+        else:
+            self._governance.set_provider(new_provider, govern_model=extract_model)
         # self._provider 是 AgentTool 等捕获方的真相源:切换后必须同步,否则子 agent 继承
         # 【初始】profile(永不更新)。同时重绑已注册 AgentTool 的 parent_provider。
         self._provider = new_provider

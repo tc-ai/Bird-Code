@@ -19,6 +19,7 @@ from birdcode.agent.system_prompt.instructions import load_project_instructions
 from birdcode.config import loader as config_loader
 from birdcode.config.schema import AppConfig, ProviderProfile
 from birdcode.memory.extractor import MemoryManager
+from birdcode.memory.governance import GovernanceManager
 from birdcode.session import paths as session_paths
 from birdcode.session.models import SessionContext
 from birdcode.session.store import SessionStore
@@ -345,6 +346,17 @@ def run_tui(
     ctx = _build_session_ctx(session_id, project_root, cwd=session_cwd)
     store = SessionStore(ctx, project_root)  # worktree_name 从 ctx.cwd 自推导(=wt_store_name)
 
+    # 记忆治理管理器:同 memory_mgr,仅真实 profile 启用。需 session_store(store 刚建好),
+    # 故在此构造(不能与 memory_mgr 同处——彼处 store 尚未建)。/profile 运行时切换不即时反映。
+    governance_mgr: GovernanceManager | None = None
+    if profile is not None:
+        governance_mgr = GovernanceManager(
+            provider,
+            project_root=project_root,
+            govern_model=profile.hak_model or profile.model,
+            session_store=store,
+        )
+
     # 屏蔽 SIGINT:Bash 子进程(cmd.exe)会破坏 Textual 的 console mode,使 ctrl+C 从
     # 「Textual 捕获为 key=copy」退化为 SIGINT → KeyboardInterrupt → 整个 TUI 退出
     # （触发 Bash 工具后 ctrl+C 直接退出、而非复制的 bug）。Textual 自身不设 SIGINT
@@ -371,6 +383,7 @@ def run_tui(
             resume=should_load,
             project_instructions=proj_instructions,
             memory=memory_mgr,
+            governance=governance_mgr,
         )
         app_holder[0] = tui
         signal.signal(signal.SIGINT, signal.SIG_IGN)

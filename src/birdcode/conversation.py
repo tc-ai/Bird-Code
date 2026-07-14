@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from birdcode.agent.context import ContextManager
     from birdcode.agents.mailbox import MailboxMessage
     from birdcode.memory.extractor import MemoryManager
+    from birdcode.memory.governance import GovernanceManager
     from birdcode.permission.rules import Rule
     from birdcode.session.store import SessionStore
     from birdcode.tools.executor import ToolExecutor
@@ -128,6 +129,7 @@ class TurnController:
         store: SessionStore | None = None,
         context: ContextManager | None = None,
         memory: MemoryManager | None = None,
+        governance: GovernanceManager | None = None,
     ) -> None:
         self._provider = provider
         self._on_event = on_event
@@ -138,6 +140,8 @@ class TurnController:
         self._context = context
         self._memory = memory
         self._extract_tasks: set[asyncio.Task[None]] = set()
+        self._governance = governance
+        self._governance_tasks: set[asyncio.Task[None]] = set()
         self._queue = MessageQueue()
         self.history: list[Turn] = []
         self.busy: bool = False
@@ -318,6 +322,10 @@ class TurnController:
         for t in self._extract_tasks:
             t.cancel()
         self._extract_tasks.clear()
+        # 记忆治理任务同清(与 _extract_tasks 对称:fire-and-forget 后台任务,/clear 期望干净)。
+        for t in self._governance_tasks:
+            t.cancel()
+        self._governance_tasks.clear()
 
     async def _drain(self) -> None:
         """消费队列直到空:str → _process(用户输入),_WakeInput → _process_wake(通知响应)。
@@ -383,6 +391,7 @@ class TurnController:
             if not self._aborted:
                 self.history.append(turn)
                 self._maybe_extract(turn)
+                self._maybe_govern(turn)
 
     def _maybe_extract(self, turn: Turn) -> None:
         """轮次干净结束后,fire-and-forget 触发记忆提取。
@@ -396,6 +405,20 @@ class TurnController:
         task = asyncio.create_task(self._memory.extract(turn, self.history))
         self._extract_tasks.add(task)
         task.add_done_callback(self._extract_tasks.discard)
+
+    def _maybe_govern(self, turn: Turn) -> None:
+        """轮次干净结束后,fire-and-forget 触发记忆治理(绝不阻塞主 agent)。
+
+        - governance 未配置(mock/未启用)→ 跳过。
+        - interrupted(Esc)→ 跳过(被打断的轮次通常无完整 assistant 回复)。
+        - 与 _maybe_extract 对称:多轮快速完成时任务排队(Lock 串行),不互相取消;
+          abort/shutdown 才 cancel。
+        """
+        if self._governance is None or turn.interrupted:
+            return
+        task = asyncio.create_task(self._governance.govern())
+        self._governance_tasks.add(task)
+        task.add_done_callback(self._governance_tasks.discard)
 
     async def _consume(self, turn: Turn) -> None:
         try:
@@ -480,6 +503,7 @@ class TurnController:
                         status=u.status,
                     )
                 self._maybe_extract(turn)
+                self._maybe_govern(turn)
 
     async def _consume_wake(self, turn: Turn) -> None:
         """wake 轮的流式消费:与 _consume 几乎一致,区别——
