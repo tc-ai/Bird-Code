@@ -35,6 +35,15 @@ class _SummaryProvider:
             raise RuntimeError("summary LLM boom")
         return f"<analysis>draft</analysis><summary>{self._summary}</summary>"
 
+    async def summarize_with_prefix(
+        self, *, prefix: list, instruction: str, max_tokens: int  # noqa: ANN001
+    ) -> str:
+        # 与 complete 同语义(共享 _calls + 失败注入),供 _compact 新调用路径(复用 prefix 缓存)测试。
+        self._calls += 1
+        if self._calls <= self._fail_times:
+            raise RuntimeError("summary LLM boom")
+        return f"<analysis>draft</analysis><summary>{self._summary}</summary>"
+
 
 def _make_cfg(**overrides: object) -> AppConfig:
     base: dict[str, object] = {
@@ -190,3 +199,110 @@ def test_split_prefix_tail_handles_tool_result_blocks():
     prefix, tail = cm._split_prefix_tail(turns)
     assert tail[-1] is turns[-1]
     assert all(t in turns for t in prefix + tail)
+
+
+# —— Tier1 snip(清旧 tool_result,零 LLM 成本推迟摘要)——
+
+
+def test_snip_old_tool_results_keeps_last_5_and_is_idempotent():
+    """保留最近 _SNIP_KEEP 个,其余置占位符;再跑不变(幂等)。"""
+    from birdcode.agent.context import _SNIP_KEEP, _SNIP_PLACEHOLDER
+    from birdcode.blocks import ToolResultBlock
+
+    cm = _cm()
+    blocks = [ToolResultBlock(tool_use_id=f"t{i}", content=f"result-{i}" * 10) for i in range(8)]
+    turn = Turn(messages=[Message(role="user", content=blocks)])
+    assert cm._snip_old_tool_results([turn]) == 8 - _SNIP_KEEP  # 清 3 个
+    assert all(b.content == _SNIP_PLACEHOLDER for b in blocks[: 8 - _SNIP_KEEP])  # 前 3 占位
+    keep = blocks[8 - _SNIP_KEEP :]
+    assert all(b.content == f"result-{i}" * 10 for i, b in enumerate(keep, start=8 - _SNIP_KEEP))
+    snap = [b.content for b in blocks]
+    assert cm._snip_old_tool_results([turn]) == 8 - _SNIP_KEEP  # 幂等:再清同样数量
+    assert [b.content for b in blocks] == snap  # 内容不变
+
+
+def test_snip_old_tool_results_returns_zero_when_no_tool_results():
+    cm = _cm()
+    turn = Turn(messages=[Message(role="user", content=[TextBlock(text="only text")])])
+    assert cm._snip_old_tool_results([turn]) == 0
+
+
+async def test_maybe_compact_tier1_snips_and_sets_stale():
+    """est ∈ [tier1, autocompact) → snip(占位旧 tool_result)+ _stale_anchor=True + trigger=snip。"""
+    from birdcode.agent.context import _SNIP_PLACEHOLDER
+    from birdcode.blocks import ToolResultBlock
+
+    cm = _cm()
+    cm._stale_anchor = False  # 让 last_in 生效(est = last_in + current 增量)
+    blocks = [ToolResultBlock(tool_use_id=f"t{i}", content="x" * 1000) for i in range(8)]
+    turns = [Turn(messages=[Message(role="user", content=blocks)])]
+    tier1 = cm._tier1_threshold()
+    res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
+    assert res is not None and res.trigger == "snip"
+    assert cm._stale_anchor is True
+    assert any(b.content == _SNIP_PLACEHOLDER for b in blocks)  # 有被占位
+
+
+async def test_maybe_compact_below_tier1_no_op():
+    cm = _cm()
+    cm._stale_anchor = False
+    turns = [_turn("small")]
+    res = await cm.maybe_compact(history=turns, current=[], last_in=1000)  # < tier1
+    assert res is None
+
+
+async def test_maybe_compact_tier1_no_tool_results_returns_none():
+    """est ∈ tier1 但 history 无 tool_result → snip 无东西可清 → None(不误触发 UI)。"""
+    cm = _cm()
+    cm._stale_anchor = False
+    turns = [_turn("q" * 100)]
+    res = await cm.maybe_compact(
+        history=turns, current=[], last_in=cm._tier1_threshold() + 100
+    )
+    assert res is None
+
+
+async def test_maybe_compact_tier1_snip_insufficient_falls_to_compact():
+    """snip 清完仍 ≥ autocompact(巨大 text 清不动)→ 转 _compact(trigger=auto)。"""
+    from birdcode.blocks import ToolResultBlock
+
+    p = _SummaryProvider(summary_text="SUM")
+    cm = _cm(provider=p)
+    cm._stale_anchor = False
+    tier1 = cm._tier1_threshold()
+    # 多 turn(prefix 非空):每 turn 巨大 text(snip 清不动)+ 2 tool_result(共 10,snip 清 5)
+    turns = [
+        Turn(messages=[
+            Message(role="user", content=[TextBlock(text="q" * 150_000)]),
+            Message(role="user", content=[
+                ToolResultBlock(tool_use_id=f"t{i}a", content="r" * 500),
+                ToolResultBlock(tool_use_id=f"t{i}b", content="r" * 500),
+            ]),
+        ])
+        for i in range(5)
+    ]
+    res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
+    assert res is not None and res.trigger == "auto"  # snip 不够 → 转 _compact
+    assert p._calls >= 1  # 调了 LLM 摘要
+
+
+async def test_maybe_compact_tier1_snip_on_activity_reason():
+    """snip 触发 on_activity,reason="snip"(UI 据此分灰色)。"""
+    from birdcode.blocks import ToolResultBlock
+
+    cm = _cm()
+    cm._stale_anchor = False
+    tier1 = cm._tier1_threshold()
+    blocks = [ToolResultBlock(tool_use_id=f"t{i}", content="x" * 1000) for i in range(8)]
+    turns = [Turn(messages=[Message(role="user", content=blocks)])]
+    events: list[tuple[str, str]] = []
+
+    async def on_activity(phase: str, reason: str, result: object) -> None:
+        events.append((phase, reason))
+
+    res = await cm.maybe_compact(
+        history=turns, current=[], last_in=tier1 + 100, on_activity=on_activity
+    )
+    assert res is not None and res.trigger == "snip"
+    assert ("start", "snip") in events
+    assert ("end", "snip") in events

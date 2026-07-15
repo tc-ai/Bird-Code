@@ -77,7 +77,7 @@ class _TestableProvider(_BaseLLMProvider):
             for m in messages
         ]
 
-    async def _open_stream(self, payload):
+    async def _open_stream(self, payload, **kwargs):
         self._calls += 1
         item = self._script.pop(0)
         if isinstance(item, BaseException):
@@ -173,7 +173,7 @@ class _RealPredProvider(_BaseLLMProvider):
             for m in messages
         ]
 
-    async def _open_stream(self, payload):
+    async def _open_stream(self, payload, **kwargs):
         self._calls += 1
         if self._script:
             item = self._script.pop(0)
@@ -263,7 +263,7 @@ def test_base_provider_stores_registry_when_given():
         def _convert(self, messages):
             return []
 
-        async def _open_stream(self, payload):
+        async def _open_stream(self, payload, **kwargs):
             return iter(())  # 不在测试中调用
 
         def _translate(self, raw):
@@ -278,7 +278,7 @@ def test_base_provider_registry_defaults_none():
         def _convert(self, messages):
             return []
 
-        async def _open_stream(self, payload):
+        async def _open_stream(self, payload, **kwargs):
             return iter(())
 
         def _translate(self, raw):

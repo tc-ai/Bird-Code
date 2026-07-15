@@ -40,6 +40,15 @@ class MockProvider:
         """
         return f"<analysis>draft</analysis>\n<summary>{user}</summary>"
 
+    async def summarize_with_prefix(
+        self, *, prefix: list[Message], instruction: str, max_tokens: int  # noqa: ARG002
+    ) -> str:
+        """摘要用(与 complete 对齐):包 <summary>,供 _extract_summary 测试。
+
+        复用 prefix 缓存的路径在 mock 下不实际命中(mock 不调 API);仅保签名一致、确定性返回。
+        """
+        return f"<analysis>draft</analysis>\n<summary>{instruction}</summary>"
+
     async def stream(
         self, messages: list[Message], *, history: list[Turn]
     ) -> AsyncIterator[ProviderEvent]:

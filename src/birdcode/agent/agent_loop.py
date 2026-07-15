@@ -172,21 +172,25 @@ async def run_agent_loop(
     fail_streak = 0
     react_retries = 0  # Reactive(413)重试计数:每轮 turn 进入时 reset;> _MAX_REACT_RETRIES 则停
 
-    async def _on_compact_activity(phase: str, cres: object) -> None:
-        """maybe_compact 的活动回调 → emit CompactionStart/End(UI 橙色转圈)。
+    async def _on_compact_activity(phase: str, reason: str, cres: object) -> None:
+        """maybe_compact 的活动回调 → emit CompactionStart/End(UI 转圈/灰色行,reason 分色)。
 
-        仅 auto 路径(maybe_compact)接到此回调;manual /compact 不经事件流。
+        reason ∈ {"auto","snip"}(maybe_compact 的 _compact / snip 路径);manual /compact 不经事件流。
         """
         if phase == "start":
-            await emit(CompactionStart(reason="auto"))
+            await emit(CompactionStart(reason=reason))
             return
         summary = ""
         fell_back = False
         if cres is not None:
             c = cast("CompactionResult", cres)
-            summary = f"已压缩 {c.pre_tokens}→{c.post_tokens} token"
+            summary = (
+                f"已折叠旧工具结果 {c.pre_tokens}→{c.post_tokens} token"
+                if reason == "snip"
+                else f"已压缩 {c.pre_tokens}→{c.post_tokens} token"
+            )
             fell_back = c.fell_back
-        await emit(CompactionEnd(reason="auto", summary=summary, fell_back=fell_back))
+        await emit(CompactionEnd(reason=reason, summary=summary, fell_back=fell_back))
 
     while True:
         # 上下文管理(Phase 1 安全网):每轮 stream 前评估压缩(超阈→Autocompact 摘要)。

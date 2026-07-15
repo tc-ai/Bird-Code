@@ -105,7 +105,9 @@ class OpenAIProvider(_BaseLLMProvider):
                 out.append({"role": "tool", "tool_call_id": r.tool_use_id, "content": r.content})
         return out
 
-    async def _open_stream(self, payload: list[dict[str, object]]) -> AsyncIterator[object]:
+    async def _open_stream(
+        self, payload: list[dict[str, object]], *, prior_len: int | None = None  # noqa: ARG002 - OpenAI 自动缓存,无需显式断点
+    ) -> AsyncIterator[object]:
         self._tool_bufs = {}
         self._stop_reason = None
         self._finish_seen = False
@@ -144,6 +146,41 @@ class OpenAIProvider(_BaseLLMProvider):
             max_completion_tokens=max_tokens,
             stream=False,
         )
+        choices = getattr(resp, "choices", []) or []
+        if not choices:
+            return ""
+        return str(getattr(choices[0].message, "content", "") or "")
+
+    async def summarize_with_prefix(
+        self, *, prefix: list[Message], instruction: str, max_tokens: int
+    ) -> str:
+        """复用主对话 system+tools+prefix 的无工具摘要(tool_choice=none),命中自动 prefix cache。
+
+        OpenAI 自动缓存(无需显式断点);镜像 reasoning_effort;instruction 作末尾 user。
+        """
+        from birdcode.agent.base_llm import normalize_messages_for_api
+        from birdcode.conversation import Message
+
+        flat = normalize_messages_for_api(
+            list(prefix) + [Message(role="user", content=[TextBlock(text=instruction)])]
+        )
+        payload = self._convert(flat)
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": self._system_text()},
+            *payload,
+        ]
+        kwargs: dict[str, object] = {
+            "model": self._profile.model,
+            "messages": messages,
+            "max_completion_tokens": max_tokens,
+            "stream": False,
+        }
+        if self._profile.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = self._profile.reasoning_effort
+        if self._registry is not None:
+            kwargs["tools"] = self._registry.to_openai_tools()
+            kwargs["tool_choice"] = "none"
+        resp = await self._client.chat.completions.create(**kwargs)  # type: ignore[no-any-return,call-overload]
         choices = getattr(resp, "choices", []) or []
         if not choices:
             return ""

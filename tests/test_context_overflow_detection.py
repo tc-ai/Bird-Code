@@ -51,7 +51,7 @@ def test_stream_raises_context_overflow_on_413():
         def _convert(self, messages):  # noqa: ANN001, ANN202 — 测试桩
             return []
 
-        async def _open_stream(self, payload):  # noqa: ANN001, ANN202
+        async def _open_stream(self, payload, **kwargs):  # noqa: ANN001, ANN202
             raise _FakeStatus(413, "too large")
 
         def _translate(self, raw):  # noqa: ANN001, ANN202

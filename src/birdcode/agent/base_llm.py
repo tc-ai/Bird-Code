@@ -200,7 +200,11 @@ class _BaseLLMProvider:
     def _convert(self, messages: list[Message]) -> list[dict[str, object]]:
         raise NotImplementedError
 
-    async def _open_stream(self, payload: list[dict[str, object]]) -> AsyncIterator[object]:
+    async def _open_stream(
+        self, payload: list[dict[str, object]], *, prior_len: int | None = None
+    ) -> AsyncIterator[object]:
+        # prior_len:payload 中 history(prior) 的条数(current 之前);子类据此在 prior 末尾
+        # 放 cache_control 断点(prior 稳定命中;current/reminder 是增量)。None=不缓存 messages。
         raise NotImplementedError
 
     def _translate(self, raw: object) -> Iterator[ProviderEvent]:
@@ -214,6 +218,17 @@ class _BaseLLMProvider:
         self, system: str, user: str, *, max_tokens: int, model: str | None = None
     ) -> str:
         """无工具一次性补全(摘要专用)。子类用各自 client 非流式 API override 实现。"""
+        raise NotImplementedError
+
+    async def summarize_with_prefix(
+        self, *, prefix: list[Message], instruction: str, max_tokens: int
+    ) -> str:
+        """复用主对话 system+tools+prefix 缓存的无工具摘要(tool_choice=none),命中 prompt cache。
+
+        prefix=历史前缀(命中主对话 messages 缓存,因主对话 prior 末有断点);instruction=摘要
+        模板(末尾 user,落断点之后)。镜像 profile.thinking(否则发含 ThinkingBlock 的 prefix →
+        Anthropic 400)。子类用各自 client 非流式 API override。
+        """
         raise NotImplementedError
 
     def _is_retryable(self, exc: BaseException) -> bool:
@@ -298,12 +313,16 @@ class _BaseLLMProvider:
         # normalize:合并连续同 role + 剥离孤儿 tool_result,兜住残缺/legacy/中段违规
         # (repair 只修末尾且落盘;normalize 保证发往 API 的 payload 恒满足交替约束)。
         flat = normalize_messages_for_api(prior + current)
+        # prior 在 normalize 后的条数(= flat 中 current 之前那段)。角色交替 + tool 配对不跨
+        # Turn 边界 → normalize(prior+current) 前 prior_len 条恰为 normalize(prior)。供 _open_stream
+        # 在 prior 末尾放 cache 断点(reminder 在 current、不进 history,prior 稳定命中)。
+        prior_len = len(normalize_messages_for_api(prior)) if prior else 0
         payload = self._convert(flat)
         attempt = 0
         while True:
             yielded_token = False
             try:
-                raw_stream = await self._open_stream(payload)
+                raw_stream = await self._open_stream(payload, prior_len=prior_len)
                 async for raw in raw_stream:
                     for ev in self._translate(raw):
                         if isinstance(ev, (TextDelta, ThinkingDelta)):

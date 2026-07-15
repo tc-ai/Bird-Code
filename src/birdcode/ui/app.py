@@ -1198,18 +1198,27 @@ class BirdApp(App[None]):
             if line is not None:
                 line.set_diff(event.old, event.new)
         elif isinstance(event, CompactionStart):
-            # 自动压缩:挂一条橙色转圈行(仿工具调用,复用 ToolLine 的 spinner/收尾)。
+            # 自动压缩(橙)/Tier1 snip(灰):挂一条转圈行(仿工具调用,复用 ToolLine)。reason 分色。
             # 挂到当前轮次下(TurnStart 已先于 agent_loop 发出 → _current_turn 通常存在)。
             turn = self._current_turn
             if turn is None:
                 turn = Turn()
                 await scroll.mount(turn)
                 self._current_turn = turn
-            line = await turn.add_tool(self._icons, color="dark_orange")
-            line.start(label="上下文空间不足，正在进行压缩")
+            is_snip = event.reason == "snip"
+            line = await turn.add_tool(
+                self._icons, color="grey50" if is_snip else "dark_orange"
+            )
+            line.start(
+                label=(
+                    "正在折叠旧工具结果以节省上下文"
+                    if is_snip
+                    else "上下文空间不足，正在进行压缩"
+                )
+            )
             self._compaction_line = line
         elif isinstance(event, CompactionEnd):
-            # 压缩结束:停转圈、显示结果摘要(橙色)。fell_back 标硬截断兜底。
+            # 结束:停转圈、显示结果摘要(颜色随 start 行,snip 为灰)。fell_back 标硬截断兜底。
             line = self._compaction_line
             if line is not None:
                 summary = event.summary or "压缩完成"

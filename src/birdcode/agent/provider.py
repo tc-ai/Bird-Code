@@ -138,3 +138,13 @@ class StreamingProvider(Protocol):
         model 非空时覆盖 profile.model(记忆提取用,走便宜模型);None 用 profile.model。
         """
         ...
+
+    async def summarize_with_prefix(
+        self, *, prefix: list[Message], instruction: str, max_tokens: int
+    ) -> str:
+        """复用主对话 system+tools+prefix 缓存的无工具摘要(tool_choice=none)。
+
+        prefix=历史前缀(命中主对话 messages 缓存);instruction=摘要模板(末尾 user,落断点之后)。
+        与 complete 的区别:复用主对话 system/tools/prefix(命中 cache),而非独立 system。
+        """
+        ...

@@ -27,6 +27,11 @@ class _SummaryProv:
     ) -> str:
         return "<analysis>x</analysis><summary>压缩摘要:用户在做 X</summary>"
 
+    async def summarize_with_prefix(
+        self, *, prefix: list, instruction: str, max_tokens: int  # noqa: ANN001
+    ) -> str:
+        return "<analysis>x</analysis><summary>压缩摘要:用户在做 X</summary>"
+
 
 def _ctx() -> SessionContext:
     return SessionContext(session_id="e2e", cwd=".", version="1", git_branch=None)

@@ -53,6 +53,9 @@ async def test_protocol_can_be_implemented():
         async def complete(self, system, user, *, max_tokens, model=None):
             return "ok"
 
+        async def summarize_with_prefix(self, *, prefix, instruction, max_tokens):
+            return "ok"
+
     assert isinstance(P(), StreamingProvider)
 
 

@@ -87,13 +87,22 @@ class AnthropicProvider(_BaseLLMProvider):
             out.append({"role": m.role, "content": blocks})
         return out
 
-    async def _open_stream(self, payload: list[dict[str, object]]) -> AsyncIterator[object]:
+    async def _open_stream(
+        self, payload: list[dict[str, object]], *, prior_len: int | None = None
+    ) -> AsyncIterator[object]:
         self._input_tokens = 0
         self._output_tokens = 0
         self._tool_buf = None
         self._stop_reason = None
         self._cache_read_tokens = 0
         self._cache_creation_tokens = 0
+        # 第 3 个 cache 断点(前两个:system/tools):落 prior 末尾(current 之前)的最后 block。
+        # prior(history,无 reminder)稳定 → 每轮命中;current(含 reminder)是增量。reminder 不进
+        # history,上轮 current 进 history 是干净版 → 前缀连续命中(不被 reminder 打断)。
+        if prior_len and 0 < prior_len <= len(payload):
+            blocks = payload[prior_len - 1].get("content")
+            if blocks:  # 防空(content 被 normalize 剥光)
+                blocks[-1]["cache_control"] = {"type": "ephemeral"}
         kwargs: dict[str, object] = {
             "model": self._profile.model,
             "max_tokens": self._app.max_tokens,
@@ -132,6 +141,61 @@ class AnthropicProvider(_BaseLLMProvider):
             messages=[{"role": "user", "content": user}],
             stream=False,
         )
+        parts: list[str] = []
+        for block in getattr(resp, "content", []) or []:
+            if getattr(block, "type", "") == "text":
+                parts.append(str(getattr(block, "text", "") or ""))
+        return "".join(parts)
+
+    async def summarize_with_prefix(
+        self, *, prefix: list[Message], instruction: str, max_tokens: int
+    ) -> str:
+        """复用主对话 system+tools+prefix 缓存的无工具摘要(tool_choice=none),命中 prompt cache。
+
+        三段同构 _open_stream(system+tools 带 cache 断点 + prefix 末断点)→ 命中主对话缓存。
+        镜像 profile.thinking:prefix 含 ThinkingBlock 时必须开 thinking,否则 API 400;
+        且 max_tokens 须 > budget 留 text 空间,否则 </summary> 被截断 → 提取失败。instruction
+        作末尾 user(落 prefix 断点之后,新内容)。
+        """
+        from birdcode.agent.base_llm import normalize_messages_for_api
+        from birdcode.conversation import Message
+
+        flat = normalize_messages_for_api(
+            list(prefix) + [Message(role="user", content=[TextBlock(text=instruction)])]
+        )
+        prior_len = len(normalize_messages_for_api(list(prefix))) if prefix else 0
+        payload = self._convert(flat)
+        # 第 3 个 cache 断点:prefix 末(instruction 之前)→ 命中主对话 prior 缓存。
+        if prior_len and 0 < prior_len <= len(payload):
+            blocks = payload[prior_len - 1].get("content")
+            if blocks:
+                blocks[-1]["cache_control"] = {"type": "ephemeral"}
+        max_tok = max_tokens
+        if self._profile.thinking is not None:
+            # 须 > budget 留 text 空间,否则摘要被 thinking 占满 → </summary> 截断 → 提取失败。
+            max_tok = max(max_tokens, self._profile.thinking.budget_tokens + 4096)
+        kwargs: dict[str, object] = {
+            "model": self._profile.model,
+            "max_tokens": max_tok,
+            "system": [
+                {
+                    "type": "text",
+                    "text": self._system_text(),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": payload,
+            "stream": False,
+        }
+        if self._profile.thinking is not None:
+            kwargs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": self._profile.thinking.budget_tokens,
+            }
+        if self._registry is not None:
+            kwargs["tools"] = self._registry.to_anthropic_tools(cached=True)
+            kwargs["tool_choice"] = {"type": "none"}
+        resp = await self._client.messages.create(**kwargs)  # type: ignore[no-any-return,call-overload]
         parts: list[str] = []
         for block in getattr(resp, "content", []) or []:
             if getattr(block, "type", "") == "text":

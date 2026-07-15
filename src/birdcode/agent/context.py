@@ -44,10 +44,11 @@ class CompactionResult:
     fell_back: bool  # 是否走了硬截断兜底(摘要失败/超限应急)
 
 
-# 压缩活动回调:phase ∈ {"start","end"}。start 时 result=None;end 时 result 为本次结果
-# (可能 None:prefix 为空等提前返回不会触发本回调;正常结束 result 非 None)。
-# 供 agent_loop 桥接成 CompactionStart/CompactionEnd 事件 → UI 橙色转圈。
-CompactActivity = Callable[[str, "CompactionResult | None"], Awaitable[None]]
+# 压缩/精简活动回调:(phase, reason, result)。phase ∈ {"start","end"};
+# reason ∈ {"auto","snip"}(manual/reactive 不经此回调)。start 时 result=None;
+# end 时 result 为本次结果(可能 None:prefix 为空等提前返回不会触发本回调;正常结束非 None)。
+# 供 agent_loop 桥接成 CompactionStart/CompactionEnd 事件 → UI 转圈/灰色行(reason 分色)。
+CompactActivity = Callable[[str, str, "CompactionResult | None"], Awaitable[None]]
 
 
 def _is_cjk(ch: str) -> bool:
@@ -114,6 +115,16 @@ _MAX_SUMMARY_FAILURES = 3
 # 摘要重试指数退避基数(秒):attempt 0→0.5, 1→1.0;仅在还会重试时睡。避免瞬时错误
 # (429/超时)连续 3 次后不可逆硬截断。
 _BACKOFF_BASE = 0.5
+
+# —— Tier1 snip(确定性清旧 tool_result,零 LLM 成本推迟全量摘要)——
+# 触发阈值 = autocompact_threshold × 此比例(接近但未到全量摘要)。
+_SNIP_THRESHOLD_RATIO = 0.85
+# 保留最近 N 个 tool_result 不清(仿 Claude Code Tier1,留近期上下文)。
+_SNIP_KEEP = 5
+# 占位符:替换旧 tool_result content。read_history / 重跑工具可取回原文。
+_SNIP_PLACEHOLDER = (
+    "[此工具结果已折叠以节省上下文 — 需要完整内容请重新运行工具或使用 read_history]"
+)
 
 
 class ContextManager:
@@ -183,24 +194,6 @@ class ContextManager:
         out = m.group(1).strip()
         return out or None
 
-    def _render_prefix_for_summary(self, prefix: list[Turn]) -> str:
-        """把 prefix turns 渲染成给摘要 LLM 的文本(9 节模板引导语见 _summary_system)。"""
-        lines: list[str] = []
-        for turn in prefix:
-            for m in turn.messages:
-                for b in m.content:
-                    if isinstance(b, TextBlock):
-                        lines.append(f"[{m.role} text] {b.text}")
-                    elif isinstance(b, ThinkingBlock):
-                        lines.append(f"[thinking] {b.text}")
-                    elif isinstance(b, ToolUseBlock):
-                        args = json.dumps(b.input, ensure_ascii=False)
-                        lines.append(f"[tool_use {b.name}] {args}")
-                    elif isinstance(b, ToolResultBlock):
-                        # 截断超长 tool_result,防渲染爆。只取前 2000 字(摘要不需要全文)。
-                        lines.append(f"[tool_result] {b.content[:2000]}")
-        return "\n".join(lines)
-
     def _summary_system(self) -> str:
         """9 节结构化摘要引导语 + 硬约束(不调工具、不脑补代码)。"""
         return (
@@ -209,9 +202,16 @@ class ContextManager:
             "1. 不要调用任何工具。\n"
             "2. 先写 <analysis>…</analysis> 草稿块梳理思路(会被丢弃),再写 "
             "<summary>…</summary> 正式摘要(只保留这个)。\n"
-            "3. 摘要按 9 节结构:① 主要请求与意图 ② 关键技术概念 ③ 文件与代码段(关键代码片段保留)"
-            " ④ 错误与修复 ⑤ 问题解决过程 ⑥ 所有用户消息(原文保留!)⑦ 待办任务 "
-            "⑧ 当前工作(最详细)⑨ 可能的下一步。\n"
+            "3. 摘要按 9 节结构:\n"
+            "① 主要请求和意图：用户到底想做什么\n"
+            "② 关键技术概念：讨论过的重要技术点\n"
+            "③ 文件和代码段：涉及哪些文件，关键代码片段要保留\n"
+            "④ 错误和修复：遇到了什么错，怎么解决的\n"
+            "⑤ 问题解决过程：解决问题的思路和方法\n"
+            "⑥ 所有用户消息：用户说过的所有非工具结果的话（原文保留！）\n"
+            "⑦ 待办任务：还没完成的事\n"
+            "⑧ 当前工作：最近在做什么（要最详细）\n"
+            "⑨ 可能的下一步：接下来打算做什么\n"
             "4. 结尾硬约束:需要文件细节请提示重新 read_file,勿凭摘要脑补代码。"
         )
 
@@ -321,11 +321,82 @@ class ContextManager:
         last_in_eff: int | None = None if self._stale_anchor else last_in
         self._stale_anchor = False
         est = self._est.estimate(history=history, current=current, last_in=last_in_eff)
-        if est < self._cfg.autocompact_threshold:
+        if est >= self._cfg.autocompact_threshold:
+            return await self._compact(
+                history, trigger="auto", pre_tokens=est, on_activity=on_activity
+            )
+        # 接近但未到阈值 → Tier1 snip(确定性清旧 tool_result content,零 LLM 成本推迟摘要)。
+        if est >= self._tier1_threshold():
+            return await self._snip(
+                history, current=current, pre_tokens=est, on_activity=on_activity
+            )
+        return None
+
+    def _tier1_threshold(self) -> int:
+        """Tier1 snip 触发阈值 = autocompact_threshold × _SNIP_THRESHOLD_RATIO。
+
+        派生自 autocompact_threshold(基于 context_window 的 property)→ 自动随配置变。
+        """
+        return int(self._cfg.autocompact_threshold * _SNIP_THRESHOLD_RATIO)
+
+    def _snip_old_tool_results(self, history: list[Turn]) -> int:
+        """原地(幂等)把旧 ToolResultBlock.content 替换为占位符,保留最近 _SNIP_KEEP 个。
+
+        按 block 反向计数(并行 tool_result 同一消息可有多个)。返回被替换的 block 数。
+        幂等:已占位的 block 仍是 str、被重收集、替换同文案 → net 不变。
+        安全:ToolResultBlock.content 是普通可变 str(blocks.py);normalize 孤儿剥离只看 id,
+        改 content 不破坏 tool_use↔tool_result 配对;codec 只校验 content 是 str。
+        """
+        results: list[ToolResultBlock] = [
+            b
+            for turn in history
+            for m in turn.messages
+            for b in m.content
+            if isinstance(b, ToolResultBlock)
+        ]
+        if len(results) <= _SNIP_KEEP:
+            return 0
+        to_replace = results[: len(results) - _SNIP_KEEP]
+        for b in to_replace:
+            b.content = _SNIP_PLACEHOLDER
+        return len(to_replace)
+
+    async def _snip(
+        self,
+        history: list[Turn],
+        *,
+        current: list[Message],
+        pre_tokens: int,
+        on_activity: CompactActivity | None = None,
+    ) -> CompactionResult | None:
+        """Tier1 snip:清旧 tool_result content(留最近 _SNIP_KEEP 个),零 LLM 成本推迟摘要。
+
+        无 tool_result 可清(replaced==0)→ None(不误触发 UI)。snip 后置 _stale_anchor
+        (旧 last_in 反映 snip 前大输入,下轮冷启动估)+ 冷启动重估;若仍 ≥ autocompact_threshold
+        (清得不够)→ 转全量 _compact(trigger="auto",走其 auto UI,不双 spinner)。
+        否则返回 CompactionResult(trigger="snip")并触发 on_activity(UI 灰色行)。
+        """
+        replaced = self._snip_old_tool_results(history)
+        if replaced == 0:
             return None
-        return await self._compact(
-            history, trigger="auto", pre_tokens=est, on_activity=on_activity
+        self._stale_anchor = True
+        post = self._est.estimate(history=history, current=current, last_in=None)
+        if post >= self._cfg.autocompact_threshold:
+            return await self._compact(
+                history, trigger="auto", pre_tokens=post, on_activity=on_activity
+            )
+        result = CompactionResult(
+            trigger="snip",
+            pre_tokens=pre_tokens,
+            post_tokens=post,
+            boundary_uuid="",
+            summary_uuid="",
+            fell_back=False,
         )
+        if on_activity is not None:
+            await on_activity("start", "snip", None)
+            await on_activity("end", "snip", result)
+        return result
 
     async def compact_now(
         self, *, history: list[Turn], trigger: str = "manual"
@@ -361,15 +432,16 @@ class ContextManager:
             return None  # 不写假边界;react 走 _hard_truncate、不经此分支
 
         if on_activity is not None:
-            await on_activity("start", None)
+            await on_activity("start", trigger, None)
         result: CompactionResult | None = None
         try:
             summary_text: str | None = None
             for attempt in range(_MAX_SUMMARY_FAILURES):
                 try:
-                    raw = await self._provider.complete(
-                        self._summary_system(),
-                        self._render_prefix_for_summary(prefix),
+                    flat_prefix = [m for t in prefix for m in t.messages]
+                    raw = await self._provider.summarize_with_prefix(
+                        prefix=flat_prefix,
+                        instruction=self._summary_system(),
                         max_tokens=self._cfg.compact_summary_reserve,
                     )
                     summary_text = self._extract_summary(raw)
@@ -420,7 +492,7 @@ class ContextManager:
             return result
         finally:
             if on_activity is not None:
-                await on_activity("end", result)
+                await on_activity("end", trigger, result)
 
     async def _hard_truncate(self, history: list[Turn], *, trigger: str) -> CompactionResult:
         """兜底:丢掉 tail 之前的全部(不调 LLM、必成功),history 原地替换为 tail。
