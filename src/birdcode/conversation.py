@@ -247,11 +247,17 @@ class TurnController:
         """从 store 加载主线填 history,并设叶子 uuid(store 内部)使后续 append 接续。
 
         无 store → 返回空(未启用持久化)。链由 store 内部维护(_last_uuid)。
+
+        #15837 防御:load 后若 turns 空 但主线 jsonl 非空(矛盾状态)→ log warning,不抛。
+        合法全新会话(jsonl 不存在)mainline_rows() 为空 → 不触发;短路保证 turns 非空时
+        零额外读(只在 turns 空 的罕见矛盾态才重读 jsonl 取行)。
         """
         if self._store is None:
             return []
         turns = await self._store.load_mainline()
         self.history = turns
+        if not turns and self._store.mainline_rows():
+            log.warning("resume: 主线 jsonl 非空但 history 为空,疑似加载截断(#15837 防御)")
         return turns
 
     async def _on_message(

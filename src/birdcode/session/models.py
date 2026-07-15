@@ -129,6 +129,11 @@ class SubagentMeta(BaseModel):
     completed_at: str | None = Field(None, alias="completedAt")
     total_duration_ms: int | None = Field(None, alias="totalDurationMs")
     total_tokens: int | None = Field(None, alias="totalTokens")
+    # 续跑(resume)三字段:prompt=任务描述(橙色提示/resume)、isolation=透传探测、
+    # base_sha=worktree 起点(收产物清单)。默认值保证旧 meta 文件前向兼容。
+    prompt: str = ""
+    isolation: str | None = Field(None, alias="isolation")  # None | "worktree"
+    base_sha: str | None = Field(None, alias="baseSha")
 
 
 @dataclass

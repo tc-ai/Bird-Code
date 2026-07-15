@@ -22,6 +22,7 @@ from birdcode.config.schema import AppConfig, ProviderProfile
 from birdcode.conversation import Message, Turn
 from birdcode.permission.gate import PermissionGate
 from birdcode.session import paths
+from birdcode.session.codec import load_sidechain_turns
 from birdcode.session.models import SessionContext, SubagentMeta
 from birdcode.session.subagent_meta import read_subagent_meta, write_subagent_meta
 from birdcode.session.subagent_store import SubagentStore
@@ -238,6 +239,8 @@ class SubagentRunner:
         root: Path | None = None,
         progress_cb: Callable[..., Awaitable[None]] | None = None,
         mailbox: asyncio.Queue | None = None,
+        agent_id: str | None = None,
+        resume_from: Path | None = None,
     ) -> None:
         self.defn = defn
         self.prompt = prompt
@@ -258,7 +261,9 @@ class SubagentRunner:
         self.root = root
         self.progress_cb = progress_cb
         self.mailbox = mailbox  # agent teams:非空→长驻 teammate 循环;None→一次性(原行为)
-        self.agent_id = f"sub-{_uuid.uuid4().hex[:12]}"
+        # 续跑(T4):注入旧 agent_id 复用(指向既有侧链/meta);None→新生成 sub-{uuid12}。
+        self.agent_id = agent_id if agent_id is not None else f"sub-{_uuid.uuid4().hex[:12]}"
+        self.resume_from = resume_from  # 非空 → resume 模式:加载侧链为 history、跳过播种
         self._worktree_name = worktree_store_name(ctx.cwd)  # 侧链与主会话同 worktree/<name>/
         self.sidechain_path = paths.subagent_jsonl_path(
             self.root or paths.default_root(), ctx.session_id, project_root, self.agent_id,
@@ -282,6 +287,7 @@ class SubagentRunner:
                 toolUseId=self.tool_use_id, spawnDepth=self.spawn_depth, isAsync=self.is_async,
                 model=self.defn.model, status="launched", spawnedAt=utc_iso(),
                 resolvedModel=None, completedAt=None, totalDurationMs=None, totalTokens=None,
+                prompt=self.prompt, isolation=self.isolation, baseSha=None,
             ),
         )
         store = SubagentStore(self.ctx, self.project_root, self.agent_id, root=self.root)
@@ -375,6 +381,7 @@ class SubagentRunner:
                 # 记 worktree 起点 sha(本次开始前 HEAD;复用路径下=本次开始前状态)。
                 # finally 头据此收集本次净改变。失败 → ""(collect 降级 [])。
                 base_sha = await current_head_sha(worktree_dir) or ""
+                _update_meta(meta_path, baseSha=base_sha)  # 供续跑收产物清单
             profile = resolve_profile(
                 self.defn.model, self.model_override, self.cfg, self.parent_provider
             )
@@ -412,13 +419,25 @@ class SubagentRunner:
                 if self.mailbox is not None
                 else None
             )
-            _update_meta(meta_path, status="running")
-            turn = Turn(messages=[Message(role="user", content=[TextBlock(text=self.prompt)])])
-            # 侧链首行:user prompt。run_agent_loop 只对【自己追加】的消息调 on_message
-            # (assistant / tool_result),不会回写初始 user turn 消息——与 TurnController._process
-            # 一致,此处手动落盘,使侧链含完整对话(user + assistant ≥ 2 行)。
-            await store.append(turn.messages[0])
-            history: list[Turn] = []
+            history: list[Turn]
+            if self.resume_from is not None:
+                # resume 模式(T4):侧链当 history(只重放旧轮次,含已执行工具——不重执,
+                # 见 Global Constraints);direction(self.prompt)作新 user turn 落侧链
+                # (规避 Claude Code #11712:resume 必须把用户新方向作为真实 user turn,
+                # 而非靠推断旧回复)。跳过 fresh 播种(history 已有旧首 turn)。
+                _update_meta(meta_path, status="running")  # 标记已重新在跑(供 T19 幂等守卫)
+                history = load_sidechain_turns(self.resume_from)
+                turn = Turn(messages=[Message(role="user", content=[TextBlock(text=self.prompt)])])
+                await store.append(turn.messages[0])
+            else:
+                _update_meta(meta_path, status="running")
+                turn = Turn(messages=[Message(role="user", content=[TextBlock(text=self.prompt)])])
+                # 侧链首行:user prompt。run_agent_loop 只对【自己追加】的消息调 on_message
+                # (assistant / tool_result),不会回写初始 user turn 消息——与
+                # TurnController._process 一致,此处手动落盘,使侧链含完整对话
+                # (user + assistant ≥ 2 行)。
+                await store.append(turn.messages[0])
+                history = []
             # agent teams:mailbox 非空 → 长驻 teammate 循环(run→park→wake→run);否则
             # 一次性 subagent(一轮即止,原行为)。run_agent_loop 返回 = 一轮自然结束(无
             # tool_use):一次性据此报完成;teammate 据此 park 等 mailbox。history 跨轮累积

@@ -93,6 +93,13 @@ class SubagentManager:
         await self._store.append(msg, is_task_notification=True, agent_id=runner.agent_id)
         self._controller.notify_wake()
 
+    def has_live(self, agent_id: str) -> bool:
+        """该 agent_id 是否有在跑的异步 task(幂等守卫:续跑前查,避免重复 launch)。
+
+        _live dict 的公共只读访问器:替代外部对 manager._live 私有字段的直访(如 resume.py)。
+        """
+        return agent_id in self._live
+
     def rebind(self, *, store: SessionStore, controller: TurnController) -> None:
         """重绑 store/controller(/resume 或 /compact 后接续新会话句柄)。"""
         self._store = store

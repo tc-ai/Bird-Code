@@ -6,7 +6,10 @@ block 用 Anthropic 原生名,未来 provider 层可把历史行 message.content
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from birdcode.agent.provider import TokenUsage
@@ -28,6 +31,12 @@ from birdcode.session.models import (
 from birdcode.utils.logging import get_logger
 
 log = get_logger("birdcode.session.codec")
+
+# 待续跑 sync agent 的合成 tool_result 占位文案(覆盖 repair 默认「请重新发起」)。
+# 主会话 resume 时,sync agent tool_use 尚无真结果(中断期未落盘)→ 用此占位;
+# 真结果经 resume_agent inline 返回(见 agents.resume.resume_subagent)。
+# 含「中断/续跑」:与 repair 默认文案(含「中断/请重新发起」)区分——「续跑」为占位专属关键词。
+_SYNC_PENDING_PLACEHOLDER = "子 agent 因会话中断未完成,待续跑(结果经续跑 inline 返回)"
 
 # ---- block ↔ dict (Anthropic 原生名) ----
 
@@ -371,10 +380,18 @@ def decode_lines_to_turns(lines: list[dict[str, Any]]) -> list[Turn]:
     return turns
 
 
-def repair_trailing_edge(turns: list[Turn]) -> list[Message]:
+def repair_trailing_edge(
+    turns: list[Turn],
+    *,
+    error_message_fn: Callable[[ToolUseBlock], str] | None = None,
+) -> list[Message]:
     """补全末尾 Turn,使主线以 role=assistant 收尾、所有 tool_use 配对。
 
     原地修改 turns[-1];返回追加的合成 Message(供 store 持久化,使再 resume 稳定)。
+
+    error_message_fn:悬空 tool_use 的合成 error 文案生成器。不传(默认 None)→ 用原
+    mainline 默认文案(向后兼容,行为严格不变);侧链续跑传 conservative_sidechain_error_message
+    (决策 B:带工具名 + 保守措辞,不催盲目重发)。
 
     取代旧实现(只补 tool_result / 丢 orphan user)——统一处理三类中断尾部:
       - 悬空 tool_use(assistant 落盘、tool_result 没落盘)→ 补 error tool_result(user)。
@@ -406,10 +423,18 @@ def repair_trailing_edge(turns: list[Turn]) -> list[Message]:
     # (罕见残缺)→ 不在此处理,交 base_llm.normalize_messages_for_api 在 flatten 时合并,
     # 避免持久化分歧(旧实现无此守卫,会在 user 后再追加 user 造成中段违规)。
     if unpaired and last_turn.messages[-1].role == "assistant":
+        # 按 id 反查 ToolUseBlock,供 error_message_fn 带工具名(决策 B)。
+        tu_by_id: dict[str, ToolUseBlock] = {
+            b.id: b for m in last_turn.messages for b in m.content if isinstance(b, ToolUseBlock)
+        }
         repair_blocks: list[ContentBlock] = [
             ToolResultBlock(
                 tool_use_id=tid,
-                content="工具调用因会话中断未完成,请重新发起",
+                content=(
+                    error_message_fn(tu_by_id[tid])
+                    if error_message_fn is not None and tid in tu_by_id
+                    else "工具调用因会话中断未完成,请重新发起"
+                ),
                 is_error=True,
             )
             for tid in sorted(unpaired)
@@ -432,6 +457,58 @@ def repair_trailing_edge(turns: list[Turn]) -> list[Message]:
         log.warning("repair:末尾以 user 收尾,已补合成 assistant 恢复角色交替")
 
     return synthetics
+
+
+def _mark_pending_sync_agent_tooluses(
+    turns: list[Turn], sync_agent_types: set[str],
+) -> int:
+    """把「待续跑 sync agent tool_use」的合成 tool_result content 改为占位文案。
+
+    前置:turns 已过 ``repair_trailing_edge``(末尾 unpaired tool_use 已补合成 error
+    tool_result,synthetic=True)。本函数在 repair 之后跑:对识别为「待续跑 sync agent」
+    的合成 tool_result,把 content 覆盖为 ``_SYNC_PENDING_PLACEHOLDER``(含「中断/续跑」),
+    覆盖 repair 默认「请重新发起」。真结果由 ``resume_agent`` inline 返回(resume 路径),
+    故占位只是历史中的临时脚手架。
+
+    识别(关键):主会话 sync agent tool_use 的 id 是 LLM 生成(toolu_xxx),runner 内部
+    tool_use_id="(sync-agent)" 只进子 agent meta/queue-op、不进主 jsonl;且中断期真
+    tool_result / toolUseResult 均未落盘。故靠 **tool_use.name == 非终态 sync
+    meta.agent_type** 配对(sync 阻塞,同时刻仅一个在跑):sync_agent_types 即当前会话
+    非终态 sync 子 agent 的 agent_type 集合(由 store.load_mainline 经
+    find_resumable_subagents 过滤 is_async=False 算出后传入)。
+
+    只改 synthetic=True 的 tool_result(repair 补的);真实 tool_result 绝不动。
+    返回改写条数(0=未命中,观测/日志用)。空 sync_agent_types → 直接返 0(无非终态
+    sync meta 时零成本短路)。
+    """
+    if not turns or not sync_agent_types:
+        return 0
+    last_turn = turns[-1]
+    if not last_turn.messages:
+        return 0
+    # tool_use_id → name 映射:用 tool_use.name 配对 sync agent 类型。
+    tu_name_by_id: dict[str, str] = {
+        b.id: b.name
+        for m in last_turn.messages
+        for b in m.content
+        if isinstance(b, ToolUseBlock)
+    }
+    changed = 0
+    for m in last_turn.messages:
+        if not m.synthetic or m.role != "user":
+            continue
+        for b in m.content:
+            if not isinstance(b, ToolResultBlock):
+                continue
+            name = tu_name_by_id.get(b.tool_use_id)
+            if name is not None and name in sync_agent_types:
+                b.content = _SYNC_PENDING_PLACEHOLDER
+                changed += 1
+    if changed:
+        log.info(
+            "sync-agent 占位:%d 个待续跑 tool_use 的合成 tool_result 改为占位文案", changed,
+        )
+    return changed
 
 
 def find_pending_notifications(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -537,3 +614,64 @@ def find_unresponded_notifications(rows: list[dict[str, Any]]) -> list[Unrespond
             )
         )
     return out
+
+
+# ---- 子 agent 侧链续跑:保守 error 文案 + 侧链加载 ----
+
+
+def conservative_sidechain_error_message(tu: ToolUseBlock) -> str:
+    """决策 B:侧链续跑时,末尾 unpaired tool_use 的合成 error 文案。
+
+    保守:不催"重新发起"(续跑是无人监督自动接着跑,盲目重发对非幂等 bash 危险);
+    改为"结果未知 + 先验状态 + 勿盲目重试副作用操作",并带工具名让子 agent 知道验什么。
+    """
+    name = tu.name or "工具"
+    return (
+        f"{name} 调用因进程中断而结果未知(可能已执行、可能未执行)。"
+        f"请先确认相关状态后再决定是否重试——对有副作用的操作"
+        f"(如 bash 写入/提交/网络请求)勿盲目重复。"
+    )
+
+
+def _read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    """逐行 jsonl → list[dict]:跳空行/坏 JSON/非 dict/半截行(断电 mid-flush)。
+
+    与 store._read_mainline_rows 不同:此处不按 isSidechain 过滤(本就是读单条侧链文件)。
+    容错半截行:json.loads 抛错即跳过,不抛给调用方(对齐主会话行读取策略)。
+    """
+    if not path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # 半截行(断电 mid-flush)跳过,不抛
+            if isinstance(obj, dict):
+                out.append(obj)
+    return out
+
+
+def load_sidechain_turns(sidechain_path: Path) -> list[Turn]:
+    """读子 agent 侧链 jsonl → split_live_segment + decode_lines + repair(决策 B 文案)。
+
+    与主会话 load_mainline 同款管线,但 repair 用保守文案(续跑场景)。
+    返回的 turns 末尾恒以 assistant 收尾、tool_use 全配对,可直接作 history 喂 run_agent_loop。
+    文件不存在/全坏行 → [](供调用方容错:无侧链 = 空历史)。
+
+    #15837 防御:侧链 jsonl 非空(raw_rows 有行)但 decode 后 turns 空(矛盾状态)→ 只记
+    warning 不抛。合法空(文件缺/全坏行)不触发——raw_rows 为空即非矛盾。
+    """
+    raw_rows = _read_jsonl_rows(sidechain_path)
+    rows = split_live_segment(raw_rows)
+    turns = decode_lines(rows)
+    repair_trailing_edge(turns, error_message_fn=conservative_sidechain_error_message)
+    if not turns and raw_rows:
+        log.warning(
+            "load_sidechain_turns: 侧链 jsonl 非空但 turns 为空,疑似加载截断(#15837 防御)"
+        )
+    return turns

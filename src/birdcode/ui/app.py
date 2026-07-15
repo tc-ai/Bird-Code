@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     from birdcode.memory.extractor import MemoryManager
     from birdcode.memory.governance import GovernanceManager
     from birdcode.permission.gate import UiPermissionGate
-    from birdcode.session.models import SessionContext
+    from birdcode.session.models import SessionContext, SubagentMeta
     from birdcode.session.store import SessionStore
     from birdcode.tools.executor import ToolExecutor
     from birdcode.tools.registry import ToolRegistry
@@ -127,10 +127,12 @@ def _reconstruct_subagent_notification(
 ) -> str | None:
     """crash 恢复:从侧链 sub-<id>.jsonl 重读最终报告 + meta 重构 <task-notification>。
 
-    侧链在 enqueue 之前已写完关闭(runner.run 返回早于 manager._inject 写 enqueue),
-    故 crash 卡在 enqueue↔user 行之间时侧链必然完整——是重构通知的权威来源,取代旧
-    enqueue.content 冗余。侧链缺失 → 退化通知(仅 id+status,无正文),使该 enqueue 仍能
-    被补投成 user 行进而被消费/dequeue,避免悬挂。
+    status 以 meta.status 为准(meta 是生命周期唯一可变文件,crash 前已落终态/最新态);
+    meta 缺失/读失败才回退调用方传的 enqueue 行 status(再回退 'completed')。非终态
+    (running/launched/idle)说明 crash 打断了运行 → is_completed=False,notification
+    不标 completed。侧链在 enqueue 之前已写完关闭(runner.run 返回早于 manager._inject
+    写 enqueue),但若 crash 发生在侧链写入中途,侧链可能缺失 → 退化通知(占位正文),
+    使该 enqueue 仍能被补投成 user 行进而被消费/dequeue,避免悬挂。
     """
     from birdcode.agents.definition import AgentDefinition
     from birdcode.agents.report import build_task_notification
@@ -143,6 +145,10 @@ def _reconstruct_subagent_notification(
     meta = read_subagent_meta(
         paths.subagent_meta_path(root, session_id, project_root, agent_id, worktree_name=wt)
     )
+    # status 优先取 meta.status(meta 缺失/读失败 → 回退调用方传的 enqueue 行 status,
+    # 再回退 'completed')。caller 当前传 enqueue 行 obj['status'] or 'completed'(见
+    # _resume_pending_notifications),故无 meta 时维持旧行为,不破坏回归。
+    resolved_status = (meta.status if meta is not None else status) or "completed"
     defn = AgentDefinition(
         name=meta.agent_type if meta else "subagent",
         description=meta.description if meta else "子 agent",
@@ -155,9 +161,9 @@ def _reconstruct_subagent_notification(
         report_text = "(子 agent 报告正文因侧链缺失未能恢复)"
     return build_task_notification(
         SubagentReport(
-            is_completed=status == "completed",
+            is_completed=resolved_status == "completed",
             text=report_text,
-            status=cast(Literal["completed", "error", "cancelled"], status),
+            status=cast(Literal["completed", "error", "cancelled"], resolved_status),
             duration_ms=0,
             tokens=0,
             tool_use_count=0,
@@ -166,6 +172,22 @@ def _reconstruct_subagent_notification(
         agent_id=agent_id,
         prompt="",
     )
+
+
+def build_resumable_reminder(metas: list[SubagentMeta]) -> str:
+    """可续跑子 agent 的 system reminder 文本(agent_id + 描述 ≤100)。
+
+    resume/"继续" 时扫到非终态 meta → 调此函数生成清单,包成 <system-reminder> 注入
+    主 agent 首轮上下文(见 _inject_resumable_reminder),供 LLM 知道续跑谁、调 resume_agent。
+    空 metas → ""(不注入)。描述优先取 prompt(任务描述),回退 description,再回退占位。
+    """
+    if not metas:
+        return ""
+    lines = ["[未完成的子 agent 任务,可用 resume_agent 工具续跑]"]
+    for m in metas:
+        desc = (m.prompt or m.description or "(无描述)")[:100]
+        lines.append(f"- agent_id={m.agent_id} status={m.status} : {desc}")
+    return "\n".join(lines)
 
 
 class BirdApp(App[None]):
@@ -276,6 +298,10 @@ class BirdApp(App[None]):
         self._team_mgr: TeamManager | None = None
         self._follow_timer: Timer | None = None  # 生成期间的「钉底」定时器
         self._bg_tasks: set[asyncio.Task[None]] = set()  # 持有后台轮次任务引用 + 回收异常
+        # T12 dedup:reminder Turn 已注入 flag。on_mount 或"继续"路由调 _inject_resumable_reminder,
+        # 首次注入置 True,后续调用跳过 append(避免 LLM 上下文累积逐字重复的 <system-reminder> 块)。
+        # /clear 开新会话时重置(见 clear_conversation),新会话恢复注入能力。
+        self._resume_reminder_injected: bool = False
 
     @property
     def controller(self) -> TurnController:
@@ -568,6 +594,29 @@ class BirdApp(App[None]):
                             parent_gate=self._gate, progress_cb=self._on_subagent_progress,
                         )
                     )
+                # ResumeAgentTool(主 agent 中介续跑,T9):单工具(非 per-defn),name 固定
+                # resume_agent。在 try 内注册:需 caps 作 agent_registry;caps 构造或能力
+                # 注册因名冲突失败时,本工具一并跳过(冲突已降级 warning,不杀 on_mount)。
+                from birdcode.agents.resume import ResumeDeps
+                from birdcode.tools.resume_agent_tool import ResumeAgentTool
+
+                resume_deps = ResumeDeps(
+                    manager=self._subagent_mgr,
+                    root=self._store.root,
+                    session_id=self._store.ctx.session_id,
+                    project_root=self._cfg.project_root or Path("."),
+                    worktree_name=self._store.worktree_name,
+                    agent_registry=caps,
+                    parent_provider=cast("ParentProvider", self._provider),
+                    parent_registry=self._tool_registry,
+                    parent_gate=self._gate,
+                    cfg=self._cfg,
+                    app=self,
+                    ctx=self._store.ctx,
+                    spawn_depth=1,
+                    progress_cb=self._on_subagent_progress,
+                )
+                self._tool_registry.register(ResumeAgentTool(deps=resume_deps))
             except (CapabilityConflictError, CommandConflictError) as e:
                 log.warning("能力(skill/agent)因名称冲突未注册:%s(请改名后重启)", e)
         # resume:加载主线填 controller.history + UI 静默重放(仅文本,工具行进待办)。
@@ -580,6 +629,10 @@ class BirdApp(App[None]):
                 # Phase2 resume 接线:补投 crash 在 enqueue↔user 行之间的通知 +
                 # 重注入已投递未响应的通知(触发 wake)。best-effort,失败由外层 except 兜。
                 await self._resume_pending_notifications()
+                # T10:可续跑子 agent 列表作为 <system-reminder> 注入主 agent 首轮上下文,
+                # 供 LLM 知道续跑谁(回答"怎么知道续跑哪些 agent")。best-effort,扫描/注入
+                # 失败只 log,不杀 resume(外层 except 已兜整体异常,此为细粒度隔离)。
+                await self._inject_resumable_reminder()
             except Exception:
                 log.debug("resume 重放失败,继续空会话", exc_info=True)
         self._apply_theme()
@@ -593,6 +646,9 @@ class BirdApp(App[None]):
         - 投递补全(find_pending_notifications):enqueue 无匹配 user 行(且无 dequeue/remove)
           → 从子 agent 侧链 sub-<id>.jsonl 重读最终报告 + meta 重构 <task-notification>
           user 行写回(侧链在 enqueue 前已落盘,是权威来源;enqueue 行不再冗余存 content)。
+          落点 A:仅补发【终态】(completed/error/cancelled,以 meta.status 为准)的完成通知
+          (免授权——crash 恢复的投递补全);非终态(launched/running/idle)跳过,交续跑路径
+          (橙色提示/继续,需用户授权)。meta 缺失视为终态(回退 enqueue 行 status)。
         - 重注入未响应(find_unresponded_notifications):已投递 user 行但无 dequeue → 唤醒
           主 agent 经 _process_wake 消费(实装)。补投后重读 rows——新写回的 user 行同样
           无 dequeue,会落入未响应轴被唤醒,与统一运行时 wake 路径一致。
@@ -602,23 +658,42 @@ class BirdApp(App[None]):
         """
         if self._store is None or self._controller is None:
             return
+        from birdcode.session import paths
         from birdcode.session.codec import (
             find_pending_notifications,
             find_unresponded_notifications,
         )
+        from birdcode.session.subagent_meta import read_subagent_meta
 
-        rows = self._store.mainline_rows()
-        # 1) 投递补全:enqueue 无 user 行 → 从侧链重构 <task-notification> user 行写回。
+        store = self._store
+        wt = store.worktree_name  # 侧链/meta 在 worktree/<name>/ 下(与 _reconstruct 一致)
+        rows = store.mainline_rows()
+        # 1) 投递补全(落点 A):enqueue 无 user 行 → 从侧链重构 <task-notification> user 行写回。
+        #    仅补发【终态】(completed/error/cancelled)的完成通知(免授权——crash 恢复的投递
+        #    补全,子 agent 已真正完成)。非终态(launched/running/idle)说明 crash 打断了运行
+        #    → 跳过,交续跑路径(橙色提示/继续 路由,T11/T12,需用户授权 T13),不在此自动注入。
+        #    meta 缺失/读失败视为终态(回退 enqueue 行 status,通常 completed)以维持旧行为,
+        #    不破坏回归(_reconstruct 内部同样以 meta 为准,meta 缺时回退 enqueue status)。
+        terminal_statuses = {"completed", "error", "cancelled"}
         for obj in find_pending_notifications(rows):
             aid = obj.get("agentId") or ""
-            status = obj.get("status") or "completed"
+            enqueue_status = obj.get("status") or "completed"
             if not aid:
                 continue
-            notification = _reconstruct_subagent_notification(self._store, aid, status)
+            meta = read_subagent_meta(
+                paths.subagent_meta_path(
+                    store.root, store.ctx.session_id, store.project_root, aid, worktree_name=wt
+                )
+            )
+            if meta is not None and meta.status not in terminal_statuses:
+                continue  # 非终态:未完成,交续跑路径,不在此自动注入
+            notification = _reconstruct_subagent_notification(
+                store, aid, meta.status if meta is not None else enqueue_status
+            )
             if notification is None:
                 continue
             try:
-                await self._store.append(
+                await store.append(
                     Message(role="user", content=[TextBlock(text=notification)]),
                     is_task_notification=True,
                     agent_id=aid,
@@ -628,6 +703,94 @@ class BirdApp(App[None]):
         # 2) 重注入未响应 → 唤醒(重读 rows:补投的 user 行也已纳入)。
         if find_unresponded_notifications(self._store.mainline_rows()):
             self._controller.notify_wake()
+
+    async def _inject_resumable_reminder(self) -> None:
+        """resume:扫可续跑子 agent → 列表作为 <system-reminder> 注入主 agent 首轮上下文。
+
+        回答"主 agent 怎么知道续跑哪些子 agent":扫 subagents/*.meta.json 的非终态
+        (launched/running/idle/cancelled)meta → build_resumable_reminder 生成 id+描述(≤100)
+        清单 → 包成 <system-reminder>(与既有 build_system_reminder 同格式)→ 合成 user Turn
+        追加到 controller.history(in-memory,不落盘)。
+
+        为何 in-memory 不落盘:reminder 是瞬态上下文(非真实对话事件),每次 on_mount 现扫
+        现注。落进 history.prior → 下轮 stream 经 _convert 进 LLM;synthetic=True 使 _replay_history
+        跳过(不当用户气泡)。normalize 会把它与用户首条文本合并(同 role user,既有工具循环
+        路径已处理此情形)。
+
+        幂等性(去重):本方法有两个调用点 —— on_mount(每会话一次)与"继续"路由(用户每次
+        输入"继续"都触发,无界)。为避免重复调用导致 LLM 上下文累积逐字相同的 <system-reminder>
+        块 + UI 橙色 ResumePrompt 堆积,加两道去重:(1) reminder Turn 去重靠
+        self._resume_reminder_injected flag,首次 append 置 True,后续跳过(flag 在 /clear 重置);
+        (2) ResumePrompt widget 去重在 _mount_resume_prompt 内部:query("ResumePrompt")
+        命中已有则不重挂。
+        净效果:首次调用 append+mount;后续调用均 no-op(除非 widget 已被用户按 i 忽略移除,
+        此时 widget 重挂但 Turn 不重复 append)。
+
+        best-effort:无 store/controller 或扫描失败 → no-op,不杀 resume。
+        """
+        if self._store is None or self._controller is None:
+            return
+        from birdcode.agents.discover import find_resumable_subagents
+        from birdcode.conversation import Turn
+        from birdcode.session import paths
+
+        store = self._store
+        try:
+            subagents_dir = paths.subagents_dir(
+                store.root,
+                store.ctx.session_id,
+                store.project_root,
+                worktree_name=store.worktree_name,
+            )
+            metas = find_resumable_subagents(subagents_dir)
+        except Exception:  # noqa: BLE001 - 扫描失败不杀 resume,降级为不注入
+            log.debug("扫描可续跑子 agent 失败,跳过 reminder 注入", exc_info=True)
+            return
+        body = build_resumable_reminder(metas)
+        if not body:
+            return  # 无可续跑 → 不注入
+        # 去重(1):reminder Turn 只 append 一次(flag 把关,防"继续"重复调用累积 LLM 上下文)。
+        if not self._resume_reminder_injected:
+            text = f"<system-reminder>\n{body}\n</system-reminder>"
+            msg = Message(role="user", content=[TextBlock(text=text)], synthetic=True)
+            self._controller.history.append(Turn(messages=[msg]))
+            self._resume_reminder_injected = True
+        # T11:同时 mount 橙色 UI 提示(可视化未完成任务清单 + 忽略 affordance)。
+        # 与 LLM 上下文注入互补:LLM 由 reminder 文本驱动,用户由 UI widget 提示。
+        # 去重(2)在 _mount_resume_prompt 内部:已有 ResumePrompt 则不重复 mount。
+        await self._mount_resume_prompt(metas)
+
+    async def _mount_resume_prompt(self, metas: list[SubagentMeta]) -> None:
+        """resume 检测到非终态子 agent → 在对话区挂橙色 ResumePrompt(各任务 agent_id + 描述≤100)。
+
+        与 _inject_resumable_reminder(注入 LLM 上下文)互补:UI 层提示用户有未完成任务,
+        可在主输入键入"继续"触发 resume 路由(另一 task),或聚焦本 widget 按 i 忽略(remove)。
+        描述截断 ≤100 复用 build_resumable_reminder 同策略(prompt→description→占位 回退)。
+
+        去重(T12):"继续"路由会无界重复调用本方法。mount 前先查 #scroll 是否已有 ResumePrompt,
+        已有则不重复 mount(避免橙色 widget 堆积)。若用户按 i 忽略移除旧 widget 后再输入"继续",
+        widget 会重挂(此为期望 —— UI 提示需要重新可见),但 reminder Turn 不会重复(由 flag 把关)。
+
+        best-effort:无 #scroll 或挂载失败 → 只 log,不杀 resume(外层 on_mount except 已兜)。
+        """
+        if not metas:
+            return
+        try:
+            from birdcode.ui.widgets.resume_prompt import ResumePrompt
+
+            # 去重:#scroll 下已有 ResumePrompt → 不重复 mount(避免"继续"重复触发导致堆积)。
+            # query 返回空列表表示未挂载;非空(1 个或多个)则直接返回。
+            try:
+                if self.query("ResumePrompt"):
+                    return
+            except Exception:  # noqa: BLE001 - query 失败降级为尝试 mount
+                pass
+            descriptions = [
+                (m.agent_id, (m.prompt or m.description or "(无描述)")[:100]) for m in metas
+            ]
+            await self.query_one("#scroll").mount(ResumePrompt(descriptions=descriptions))
+        except Exception:  # noqa: BLE001 - 挂载失败不影响 reminder 注入或 resume
+            log.debug("mount resume prompt failed", exc_info=True)
 
     async def _get_mode(self) -> Mode:
         assert self.mode in ("plan", "default", "accept-edits", "bypass")
@@ -937,6 +1100,42 @@ class BirdApp(App[None]):
         self._stick()
         self._refresh_status()
 
+    async def _maybe_route_continue(self, text: str) -> bool:
+        """用户输入"继续"路由(Task 12)。
+
+        严格匹配 strip 后 == "继续" 才触发:扫可续跑子 agent,有则注入 LLM reminder +
+        mount 橙色 ResumePrompt(复用 _inject_resumable_reminder,内部再做一次权威扫描 +
+        mount),返回 True —— 调用方据此跳过 controller.submit(授权后由主 agent 调
+        resume_agent,T13)。无可续跑 / 非"继续" / 无 store / 扫描失败 → 返回 False,
+        透传 submit 当普通消息(绝不静默吞输入)。
+
+        双扫说明:此处先扫一次决定「拦截 vs 透传」,命中后再交给 _inject_resumable_reminder
+        重扫+注入+mount。两次扫只发生在键入"继续"时(罕见),读几个小 JSON 文件开销可忽略;
+        保留 _inject_resumable_reminder 自带扫描使其幂等入口不变(T10 契约)。
+        """
+        if text.strip() != "继续":
+            return False
+        if self._store is None or self._controller is None:
+            return False
+        from birdcode.agents.discover import find_resumable_subagents
+        from birdcode.session import paths
+
+        try:
+            subagents_dir = paths.subagents_dir(
+                self._store.root,
+                self._store.ctx.session_id,
+                self._store.project_root,
+                worktree_name=self._store.worktree_name,
+            )
+            metas = find_resumable_subagents(subagents_dir)
+        except Exception:  # noqa: BLE001 - 扫描失败不杀输入,降级透传当普通消息
+            log.debug("继续路由扫描可续跑子 agent 失败,透传 submit", exc_info=True)
+            return False
+        if not metas:
+            return False
+        await self._inject_resumable_reminder()  # 注入 reminder + mount ResumePrompt(T10/T11)
+        return True
+
     @on(InputArea.Submitted)
     async def _on_submitted(self, event: InputArea.Submitted) -> None:
         text = event.text.strip()
@@ -958,6 +1157,9 @@ class BirdApp(App[None]):
                 self._stick()  # 未知命令分支不走 _dispatch,需手动钉底(否则反馈可能在视口外)
             else:
                 await self._dispatch(cmd, parsed.args)
+            return
+        # Task 12:"继续" 路由 —— 有可续跑子 agent 则 mount+注入并拦截 submit,否则透传。
+        if await self._maybe_route_continue(event.text):
             return
         task = asyncio.create_task(self.controller.submit(event.text))
         self._bg_tasks.add(task)
@@ -1024,6 +1226,7 @@ class BirdApp(App[None]):
         self._diff_pending.clear()
         self._current_turn = None
         self._thinking_round = 0  # 重置思考轮次(/clear 开新会话)
+        self._resume_reminder_injected = False  # 新会话恢复 reminder 注入能力
         self.controller.history.clear()
         self.usage = None
         if self._store is None:

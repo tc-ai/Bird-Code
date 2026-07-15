@@ -507,6 +507,11 @@ class SessionStore:
         self._last_uuid = next((r.get("uuid") for r in reversed(rows) if r.get("uuid")), None)
         turns = codec.decode_lines(rows)
         synthetics = codec.repair_trailing_edge(turns)
+        # sync 中断占位:待续跑 sync agent tool_use 的合成 tool_result content 改为
+        # 「中断,待续跑」(真结果经 resume_agent inline 返回)。在持久化前跑,使占位写入
+        # jsonl(再 resume 稳定)。仅命中「非终态 sync meta 的 agent_type」对应的 tool_use,
+        # 其他(正常完成/async/无关 tool_use)零影响。
+        codec._mark_pending_sync_agent_tooluses(turns, self._pending_sync_agent_types())
         # 持久化合成消息(使再 resume 稳定)。best-effort:append 自身已吞
         # OSError/ValueError;此 try 兜意外异常——放弃持久化自愈,但内存 turns 仍正确,
         # base_llm.normalize 在 flatten 时兜底,不杀 resume。下次 load 会再修(idempotent)。
@@ -532,6 +537,28 @@ class SessionStore:
             except OSError:
                 log.debug("load_mainline backfill meta 写失败(不影响 resume)", exc_info=True)
         return turns
+
+    def _pending_sync_agent_types(self) -> set[str]:
+        """当前会话【非终态 sync 子 agent】的 agent_type 集合(供 sync 占位配对)。
+
+        复用 agents.discover.find_resumable_subagents(状态非终态 ∪ cancelled),再过滤
+        is_async=False(sync)。函数级 import:避免会话层模块加载期反向依赖 agents 层。
+        无 subagents 目录 /无非终态 sync meta → 空集(占位短路,零影响)。
+
+        配对依据:主会话 sync agent tool_use 的 id 是 LLM 生成,无法直联 agent_id;
+        但 tool_use.name == meta.agent_type(_AgentTool 以 defn.name 注册),故按类型名配对。
+        """
+        from birdcode.agents.discover import find_resumable_subagents
+
+        sub_dir = paths.subagents_dir(
+            self._root, self._ctx.session_id, self._project_root,
+            worktree_name=self._worktree_name,
+        )
+        return {
+            m.agent_type
+            for m in find_resumable_subagents(sub_dir)
+            if not m.is_async
+        }
 
     def _read_mainline_rows(self) -> list[dict[str, Any]]:
         """读 jsonl 主线行:跳过空/坏 JSON/非 dict/isSidechain 行。"""
