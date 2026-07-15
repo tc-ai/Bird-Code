@@ -68,6 +68,10 @@ class AnthropicProvider(_BaseLLMProvider):
                 if isinstance(b, TextBlock):
                     blocks.append({"type": "text", "text": b.text})
                 elif isinstance(b, ThinkingBlock):
+                    if self._profile.thinking is None:
+                        # profile 未开 thinking:不发 ThinkingBlock(否则 API 400)。免疫切
+                        # profile(thinking→非 thinking)后 history 残留 ThinkingBlock 的回归。
+                        continue
                     blocks.append(
                         {"type": "thinking", "thinking": b.text, "signature": b.signature}
                     )
@@ -164,6 +168,10 @@ class AnthropicProvider(_BaseLLMProvider):
             list(prefix) + [Message(role="user", content=[TextBlock(text=instruction)])]
         )
         prior_len = len(normalize_messages_for_api(list(prefix))) if prefix else 0
+        # 同 base_llm.stream:prefix 末若与 instruction(user)同 role → normalize 合并使
+        # prior_len==len(flat),断点落末条会纳入 instruction → 前移一条落纯 prefix 稳定区。
+        if prior_len and prior_len == len(flat) and len(flat) > 1:
+            prior_len = len(flat) - 1
         payload = self._convert(flat)
         # 第 3 个 cache 断点:prefix 末(instruction 之前)→ 命中主对话 prior 缓存。
         if prior_len and 0 < prior_len <= len(payload):

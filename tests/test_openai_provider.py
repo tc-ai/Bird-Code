@@ -57,23 +57,27 @@ async def _stream(seq):
 
 
 class FakeCompletions:
-    def __init__(self, chunks):
+    def __init__(self, chunks, nonstream_resp=None):
         self.chunks = chunks
         self.last_kwargs = None
+        self._nonstream_resp = nonstream_resp
 
     async def create(self, **kwargs):
         self.last_kwargs = kwargs
+        # 非流式(summarize_with_prefix, stream=False)返回 message 对象;流式返回 async gen。
+        if not kwargs.get("stream", True) and self._nonstream_resp is not None:
+            return self._nonstream_resp
         return _stream(self.chunks)
 
 
 class FakeChat:
-    def __init__(self, chunks):
-        self.completions = FakeCompletions(chunks)
+    def __init__(self, chunks, nonstream_resp=None):
+        self.completions = FakeCompletions(chunks, nonstream_resp)
 
 
 class FakeOpenAI:
-    def __init__(self, chunks):
-        self.chat = FakeChat(chunks)
+    def __init__(self, chunks, nonstream_resp=None):
+        self.chat = FakeChat(chunks, nonstream_resp)
 
 
 @pytest.mark.asyncio
@@ -304,3 +308,38 @@ async def test_usage_input_not_double_counted_under_openai_semantics():
     out = [e async for e in p.stream([Message(role="user", content=[TextBlock("x")])], history=[])]
     assert out[-1].usage.input_tokens == 1000  # 不是 1800
     assert out[-1].usage.cache_read_tokens == 800
+
+
+# ---- summarize_with_prefix(#10:reasoning 摘要留 text 空间)----
+
+
+def _nonstream_resp(text: str):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=text))]
+    )
+
+
+@pytest.mark.asyncio
+async def test_summarize_bumps_max_tokens_for_reasoning():
+    """#10:reasoning_effort set → summarize_with_prefix 提升 max_completion_tokens
+    (留 reasoning 之后的 text 空间,防 </summary> 被截断 → 提取失败 → 重试 → 硬截断)。"""
+    app, prof = _app(effort="medium")
+    client = FakeOpenAI([], nonstream_resp=_nonstream_resp("<summary>S</summary>"))
+    p = OpenAIProvider(prof, app, client=client)
+    await p.summarize_with_prefix(prefix=[], instruction="I", max_tokens=2000)
+    kw = client.chat.completions.last_kwargs
+    assert kw["stream"] is False
+    assert kw["max_completion_tokens"] == 2000 + 4096  # reasoning → +margin
+    assert kw["reasoning_effort"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_summarize_no_margin_when_no_reasoning():
+    """无 reasoning_effort → max_completion_tokens 不提升(与 _open_stream 一致)。"""
+    app, prof = _app()  # effort=None
+    client = FakeOpenAI([], nonstream_resp=_nonstream_resp("<summary>S</summary>"))
+    p = OpenAIProvider(prof, app, client=client)
+    await p.summarize_with_prefix(prefix=[], instruction="I", max_tokens=2000)
+    kw = client.chat.completions.last_kwargs
+    assert kw["max_completion_tokens"] == 2000
+    assert "reasoning_effort" not in kw

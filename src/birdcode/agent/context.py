@@ -327,25 +327,23 @@ class ContextManager:
             )
         # 接近但未到阈值 → Tier1 snip(确定性清旧 tool_result content,零 LLM 成本推迟摘要)。
         if est >= self._tier1_threshold():
-            return await self._snip(
-                history, current=current, pre_tokens=est, on_activity=on_activity
-            )
+            return await self._snip(history, current=current, on_activity=on_activity)
         return None
 
     def _tier1_threshold(self) -> int:
         """Tier1 snip 触发阈值 = autocompact_threshold × _SNIP_THRESHOLD_RATIO。
 
         派生自 autocompact_threshold(基于 context_window 的 property)→ 自动随配置变。
+        下界 0:小窗口 + 默认 reserve/margin 可使 autocompact_threshold 为负,无下界则
+        est >= tier1 恒真 → 每轮误进 snip(虽 replaced==0 时仍 no-op,但白算一遍)。
         """
-        return int(self._cfg.autocompact_threshold * _SNIP_THRESHOLD_RATIO)
+        return max(int(self._cfg.autocompact_threshold * _SNIP_THRESHOLD_RATIO), 0)
 
-    def _snip_old_tool_results(self, history: list[Turn]) -> int:
-        """原地(幂等)把旧 ToolResultBlock.content 替换为占位符,保留最近 _SNIP_KEEP 个。
+    def _snip_targets(self, history: list[Turn]) -> list[tuple[ToolResultBlock, str]]:
+        """收集待占位的 (block, 原文),保留最近 _SNIP_KEEP 个;排除已占位 → 幂等。
 
-        按 block 反向计数(并行 tool_result 同一消息可有多个)。返回被替换的 block 数。
-        幂等:已占位的 block 仍是 str、被重收集、替换同文案 → net 不变。
-        安全:ToolResultBlock.content 是普通可变 str(blocks.py);normalize 孤儿剥离只看 id,
-        改 content 不破坏 tool_use↔tool_result 配对;codec 只校验 content 是 str。
+        按 block 反向计数(并行 tool_result 同一消息可有多个)。返回原文供 _snip 升级
+        _compact 时恢复(摘要需看原文 tool_result,占位符丢细节)。
         """
         results: list[ToolResultBlock] = [
             b
@@ -355,39 +353,60 @@ class ContextManager:
             if isinstance(b, ToolResultBlock)
         ]
         if len(results) <= _SNIP_KEEP:
-            return 0
+            return []
         to_replace = results[: len(results) - _SNIP_KEEP]
-        for b in to_replace:
+        # 排除已占位:二次进入时它们仍是 ToolResultBlock 会被重收集,但 net 无变化。
+        # 返回前过滤 → 调用方据 len 判"有无实际工作"(0 → no-op,不误触发 UI/_stale_anchor)。
+        return [(b, b.content) for b in to_replace if b.content != _SNIP_PLACEHOLDER]
+
+    def _snip_old_tool_results(self, history: list[Turn]) -> int:
+        """原地(幂等)把旧 ToolResultBlock.content 替换为占位符,保留最近 _SNIP_KEEP 个。
+
+        返回**真正改变**的 block 数(已占位的不计 → 二次调用返回 0,标识 no-op)。
+        安全:ToolResultBlock.content 是普通可变 str(blocks.py);normalize 孤儿剥离只看 id,
+        改 content 不破坏 tool_use↔tool_result 配对;codec 只校验 content 是 str。
+        """
+        saved = self._snip_targets(history)
+        for b, _ in saved:
             b.content = _SNIP_PLACEHOLDER
-        return len(to_replace)
+        return len(saved)
 
     async def _snip(
         self,
         history: list[Turn],
         *,
         current: list[Message],
-        pre_tokens: int,
         on_activity: CompactActivity | None = None,
     ) -> CompactionResult | None:
         """Tier1 snip:清旧 tool_result content(留最近 _SNIP_KEEP 个),零 LLM 成本推迟摘要。
 
-        无 tool_result 可清(replaced==0)→ None(不误触发 UI)。snip 后置 _stale_anchor
-        (旧 last_in 反映 snip 前大输入,下轮冷启动估)+ 冷启动重估;若仍 ≥ autocompact_threshold
-        (清得不够)→ 转全量 _compact(trigger="auto",走其 auto UI,不双 spinner)。
-        否则返回 CompactionResult(trigger="snip")并触发 on_activity(UI 灰色行)。
+        无可清(saved 空,含二次进入已全占位)→ None(不误触发 UI/_stale_anchor)。
+        pre/post 均 cold 估(同口径,避免 anchored pre + cold post 混口径致 UI post>pre)。
+        snip 后置 _stale_anchor(旧 last_in 反映 snip 前大输入,下轮冷启动估)+ 冷启动重估;
+        若仍 ≥ autocompact_threshold(清得不够)→ **先恢复原文**再转全量 _compact(否则摘要
+        看到占位符,丢旧 tool_result 细节)。否则返回 CompactionResult(trigger="snip")并
+        触发 on_activity(UI 灰色行)。
         """
-        replaced = self._snip_old_tool_results(history)
-        if replaced == 0:
+        saved = self._snip_targets(history)
+        if not saved:
             return None
+        # 改前 cold 估(pre);与改后 post 同口径(maybe_compact 传来的 est 可能 anchored,
+        # 不复用以避免混口径)。
+        pre_cold = self._est.estimate(history=history, current=current, last_in=None)
+        for b, _ in saved:
+            b.content = _SNIP_PLACEHOLDER
         self._stale_anchor = True
         post = self._est.estimate(history=history, current=current, last_in=None)
         if post >= self._cfg.autocompact_threshold:
+            # 恢复:_compact 要摘要原文 tool_result(占位符会让摘要丢前文细节)。
+            for b, old in saved:
+                b.content = old
             return await self._compact(
                 history, trigger="auto", pre_tokens=post, on_activity=on_activity
             )
         result = CompactionResult(
             trigger="snip",
-            pre_tokens=pre_tokens,
+            pre_tokens=pre_cold,
             post_tokens=post,
             boundary_uuid="",
             summary_uuid="",
@@ -436,9 +455,10 @@ class ContextManager:
         result: CompactionResult | None = None
         try:
             summary_text: str | None = None
+            # prefix 在重试循环内不变,提出循环外避免重复 rebuild。
+            flat_prefix = [m for t in prefix for m in t.messages]
             for attempt in range(_MAX_SUMMARY_FAILURES):
                 try:
-                    flat_prefix = [m for t in prefix for m in t.messages]
                     raw = await self._provider.summarize_with_prefix(
                         prefix=flat_prefix,
                         instruction=self._summary_system(),

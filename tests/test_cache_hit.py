@@ -203,3 +203,60 @@ async def test_summarize_with_prefix_mirrors_thinking_and_bumps_max_tokens():
     kw = c.messages.last_kwargs
     assert kw["thinking"] == {"type": "enabled", "budget_tokens": 8000}
     assert kw["max_tokens"] >= 8000 + 4096  # 兜底:留 text 空间
+
+
+@pytest.mark.asyncio
+async def test_messages_breakpoint_avoids_merged_current():
+    """#1:工具循环中 history 末是 user(tool_result)、current 首条是 user(text) → normalize
+    合并同 role 使 prior_len==len(flat)。断点须前移避开合并条(否则纳入 current 的
+    reminder/新输入 → 每轮 cache miss),落在合并条之前的纯 prior 稳定区。"""
+    from birdcode.blocks import ToolResultBlock, ToolUseBlock
+    from birdcode.conversation import Turn
+
+    events = [
+        _ev(type="message_start", message=_ev(usage=_ev(input_tokens=1))),
+        _ev(type="message_stop"),
+    ]
+    app, prof = _app_prof()
+    c = _FakeAnthropic(events)
+    p = AnthropicProvider(prof, app, client=c)
+    history = [Turn(messages=[
+        Message(role="user", content=[TextBlock(text="past question")]),
+        Message(role="assistant", content=[ToolUseBlock(id="t1", name="f", input={})]),
+        Message(role="user", content=[ToolResultBlock(tool_use_id="t1", content="result blob")]),
+    ])]
+    _ = [
+        e async for e in p.stream(
+            [Message(role="user", content=[TextBlock(text="continue")])], history=history
+        )
+    ]
+    msgs = c.messages.last_kwargs["messages"]
+    # flat = [user(past q), assistant(tool_use), user(tool_result + continue + reminder)]
+    # prior 末(user tool_result)与 current 首(user text)同 role 合并 → prior_len==len(flat)
+    # → 前移:断点落 msgs[1](assistant tool_use,纯 prior),不落 msgs[2](合并条含 current)。
+    assert len(msgs) == 3
+    assert "cache_control" not in msgs[2]["content"][-1]  # 合并条(含 current)无断点
+    assert msgs[1]["content"][-1].get("cache_control") == {"type": "ephemeral"}
+
+
+@pytest.mark.asyncio
+async def test_convert_skips_thinking_block_when_profile_thinking_none():
+    """#2:profile.thinking=None 时 _convert 不输出 thinking block(免疫切 profile
+    thinking→非 thinking 后 history 残留 ThinkingBlock 触发 API 400 的回归)。"""
+    from birdcode.blocks import ThinkingBlock
+
+    app, prof = _app_prof()  # prof.thinking 默认 None
+    c = _FakeAnthropic([
+        _ev(type="message_start", message=_ev(usage=_ev(input_tokens=1))),
+        _ev(type="message_stop"),
+    ])
+    p = AnthropicProvider(prof, app, client=c)
+    _ = [e async for e in p.stream([Message(role="user", content=[TextBlock("q")])], history=[])]
+    msg_with_thinking = [Message(role="assistant", content=[
+        ThinkingBlock(text="prior reasoning", signature="sig"),
+        TextBlock(text="answer"),
+    ])]
+    out = p._convert(msg_with_thinking)
+    types = [b.get("type") for b in out[0]["content"]]
+    assert "thinking" not in types  # 跳过 ThinkingBlock
+    assert "text" in types

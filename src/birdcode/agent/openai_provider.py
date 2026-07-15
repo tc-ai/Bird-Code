@@ -169,10 +169,15 @@ class OpenAIProvider(_BaseLLMProvider):
             {"role": "system", "content": self._system_text()},
             *payload,
         ]
+        max_tok = max_tokens
+        if self._profile.reasoning_effort is not None:
+            # reasoning 占 completion 配额,不提升则 reasoning 吃满 → </summary> 截断 → 提取失败。
+            # 与 Anthropic 路径(budget+4096)对齐:加固定 margin 留 text 空间。
+            max_tok = max_tokens + 4096
         kwargs: dict[str, object] = {
             "model": self._profile.model,
             "messages": messages,
-            "max_completion_tokens": max_tokens,
+            "max_completion_tokens": max_tok,
             "stream": False,
         }
         if self._profile.reasoning_effort is not None:

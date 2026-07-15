@@ -313,10 +313,14 @@ class _BaseLLMProvider:
         # normalize:合并连续同 role + 剥离孤儿 tool_result,兜住残缺/legacy/中段违规
         # (repair 只修末尾且落盘;normalize 保证发往 API 的 payload 恒满足交替约束)。
         flat = normalize_messages_for_api(prior + current)
-        # prior 在 normalize 后的条数(= flat 中 current 之前那段)。角色交替 + tool 配对不跨
-        # Turn 边界 → normalize(prior+current) 前 prior_len 条恰为 normalize(prior)。供 _open_stream
-        # 在 prior 末尾放 cache 断点(reminder 在 current、不进 history,prior 稳定命中)。
+        # prior_len:flat 中 current 之前的条数,供 _open_stream 在 prior 末放 cache 断点。
+        # 注意不变性 normalize(prior+current)[:n]==normalize(prior) 并非总成立:normalize 会
+        # 合并连续同 role 消息。工具循环中 history 末常是 user(tool_result)、current 首条是
+        # user(text)→ 同 role 被并入 prior 末条,使 prior_len==len(flat)。此时断点若落末条
+        # 会纳入 current(reminder 每轮变→cache miss),前移一条让断点落在纯 prior 稳定区。
         prior_len = len(normalize_messages_for_api(prior)) if prior else 0
+        if prior_len and prior_len == len(flat) and len(flat) > 1:
+            prior_len = len(flat) - 1
         payload = self._convert(flat)
         attempt = 0
         while True:

@@ -217,7 +217,8 @@ def test_snip_old_tool_results_keeps_last_5_and_is_idempotent():
     keep = blocks[8 - _SNIP_KEEP :]
     assert all(b.content == f"result-{i}" * 10 for i, b in enumerate(keep, start=8 - _SNIP_KEEP))
     snap = [b.content for b in blocks]
-    assert cm._snip_old_tool_results([turn]) == 8 - _SNIP_KEEP  # 幂等:再清同样数量
+    # 幂等:已占位的二次调用无实际工作 → 返回 0(不误触发 UI/_stale_anchor)。
+    assert cm._snip_old_tool_results([turn]) == 0
     assert [b.content for b in blocks] == snap  # 内容不变
 
 
@@ -306,3 +307,99 @@ async def test_maybe_compact_tier1_snip_on_activity_reason():
     assert res is not None and res.trigger == "snip"
     assert ("start", "snip") in events
     assert ("end", "snip") in events
+
+
+# —— snip 修复:xhigh review #3/#4/#5 ——
+
+
+async def test_tier1_snip_idempotent_no_spurious_activity():
+    """#3:二次进入 tier1(tool_result 已全占位)→ _snip_targets 过滤 → 无实际工作 →
+    不重复触发 on_activity / 不重置 _stale_anchor(修每轮 spurious snip 事件)。"""
+    from birdcode.blocks import ToolResultBlock
+
+    cm = _cm()
+    cm._stale_anchor = False
+    tier1 = cm._tier1_threshold()
+    blocks = [ToolResultBlock(tool_use_id=f"t{i}", content="x" * 1000) for i in range(8)]
+    turns = [Turn(messages=[Message(role="user", content=blocks)])]
+    events: list[tuple[str, str]] = []
+
+    async def on_activity(phase: str, reason: str, result: object) -> None:
+        events.append((phase, reason))
+
+    first = await cm.maybe_compact(
+        history=turns, current=[], last_in=tier1 + 100, on_activity=on_activity
+    )
+    assert first is not None and first.trigger == "snip"
+    assert ("start", "snip") in events and ("end", "snip") in events
+    # 二次:blocks 已占位 → _snip_targets 返回空 → None,不触发 activity
+    events.clear()
+    cm._stale_anchor = False  # 重置以再次走 last_in 进 tier1(隔离 _stale_anchor 干扰)
+    second = await cm.maybe_compact(
+        history=turns, current=[], last_in=tier1 + 100, on_activity=on_activity
+    )
+    assert second is None
+    assert events == []  # 无 spurious activity
+
+
+async def test_tier1_snip_escalate_restores_original_tool_results():
+    """#4:snip 清完仍 ≥ 阈值 → 升级 _compact 前**恢复原文 tool_result**(否则摘要看到占位符,
+    丢前文细节——旧路径 _render_prefix_for_summary 带 2000-char 预览保留的细节)。"""
+    from birdcode.agent.context import _SNIP_PLACEHOLDER
+    from birdcode.blocks import ToolResultBlock
+
+    class _RecordingProvider(_SummaryProvider):
+        def __init__(self) -> None:
+            super().__init__(summary_text="SUM")
+            self.seen_prefix: list | None = None
+
+        async def summarize_with_prefix(  # noqa: ANN001
+            self, *, prefix: list, instruction: str, max_tokens: int
+        ) -> str:
+            self.seen_prefix = prefix
+            return await super().summarize_with_prefix(
+                prefix=prefix, instruction=instruction, max_tokens=max_tokens
+            )
+
+    p = _RecordingProvider()
+    cm = _cm(provider=p)
+    cm._stale_anchor = False
+    tier1 = cm._tier1_threshold()
+    turns = [
+        Turn(messages=[
+            Message(role="user", content=[TextBlock(text="q" * 150_000)]),
+            Message(role="user", content=[
+                ToolResultBlock(tool_use_id=f"t{i}a", content="ORIGINAL-RESULT" + "r" * 500),
+                ToolResultBlock(tool_use_id=f"t{i}b", content="ORIGINAL-RESULT" + "r" * 500),
+            ]),
+        ])
+        for i in range(5)
+    ]
+    res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
+    assert res is not None and res.trigger == "auto"  # snip 不够 → 升级 _compact
+    assert p._calls >= 1
+    # 摘要看到的 prefix 含原文 tool_result,不含占位符
+    assert p.seen_prefix is not None
+    seen = [
+        b.content
+        for m in p.seen_prefix
+        for b in m.content
+        if isinstance(b, ToolResultBlock)
+    ]
+    assert any("ORIGINAL-RESULT" in (c or "") for c in seen)
+    assert not any(c == _SNIP_PLACEHOLDER for c in seen)
+
+
+async def test_tier1_snip_pre_post_same_cold_estimator():
+    """#5:snip 的 pre/post 均 cold 估(同口径)→ pre >= post(修 anchored pre + cold post
+    混口径致 UI 显示 post>pre 的误导)。"""
+    from birdcode.blocks import ToolResultBlock
+
+    cm = _cm()
+    cm._stale_anchor = False
+    tier1 = cm._tier1_threshold()
+    blocks = [ToolResultBlock(tool_use_id=f"t{i}", content="x" * 5000) for i in range(8)]
+    turns = [Turn(messages=[Message(role="user", content=blocks)])]
+    res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
+    assert res is not None and res.trigger == "snip"
+    assert res.pre_tokens >= res.post_tokens  # 同 cold 口径,清后必 <= 清前
