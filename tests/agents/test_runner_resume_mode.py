@@ -178,3 +178,47 @@ async def test_run_resume_loads_sidechain_as_history_and_appends_direction(tmp_p
     assert "继续,改成 X" in sidechain_path.read_text(encoding="utf-8")
     # report 正常完成(resume 路径不崩)
     assert report.status == "completed"
+
+
+async def test_run_resume_preserves_meta_prompt_not_clobbered_by_direction(tmp_path: Path):
+    """review #3:续跑保留旧 meta.prompt(原任务)/spawnedAt,不被 direction 覆写。
+
+    修 #3 前:run() 顶部无条件 write(launched, prompt=self.prompt=direction)→ meta.prompt 变成
+    "继续…"(reminder/可续跑清单显示 direction 而非原任务)、spawnedAt 重置(计费丢首跑时间)。
+    修后:resume 读旧 meta、仅 _update_meta 刷 status,原任务描述与首次派生时间保留。
+    """
+    from birdcode.agents import runner
+    from birdcode.session import paths
+    from birdcode.session.models import SubagentMeta
+    from birdcode.session.subagent_meta import read_subagent_meta, write_subagent_meta
+
+    agent_id = "sub-keep3"
+    meta_path = paths.subagent_meta_path(tmp_path, "s1", tmp_path, agent_id, worktree_name=None)
+    write_subagent_meta(
+        meta_path,
+        SubagentMeta(
+            agentId=agent_id, agentType="general-purpose", description="原任务描述",
+            toolUseId="call_resume", isAsync=False, status="running",
+            spawnedAt="2026-01-01T00:00:00Z", prompt="原任务:实现 X",
+        ),
+    )
+    fake_sidechain = tmp_path / "agent-sub-keep3.jsonl"
+    _write_paired_sidechain(fake_sidechain, user_text="原任务")
+
+    def _build(profile, cfg, *, registry=None, system_override=None, mcp_instructions=None):  # noqa: ARG001
+        return _FakeProvider(profile=profile)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(runner, "build_provider", _build)
+        runner_obj = _build_test_runner(
+            agent_id=agent_id, resume_from=fake_sidechain, prompt="继续,改 Y",
+            tmp_path=tmp_path,
+        )
+        report = await runner_obj.run()
+
+    meta = read_subagent_meta(meta_path)
+    assert meta is not None
+    assert meta.prompt == "原任务:实现 X"  # 保留,未被 direction "继续,改 Y" 覆写
+    assert meta.spawned_at == "2026-01-01T00:00:00Z"  # 保留(未重置)
+    assert meta.status == "completed"
+    assert report.status == "completed"

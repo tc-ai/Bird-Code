@@ -7,10 +7,16 @@ sync 子 agent → 阻塞 inline 返回报告;async → 回 ack,完成走 task-n
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel, Field
 
 from birdcode.agents.resume import ResumeDeps, resume_subagent
 from birdcode.tools.base import Tool
+
+if TYPE_CHECKING:
+    from birdcode.agents.runner import ParentProvider
+    from birdcode.session.models import SessionContext
 
 
 class ResumeAgentInput(BaseModel):
@@ -45,6 +51,22 @@ class ResumeAgentTool(Tool):
             "sync 子 agent 阻塞等结果,async 后台跑完成后通知。"
         )
         self._deps = deps
+
+    def rebind(
+        self, *, ctx: SessionContext | None = None, provider: ParentProvider | None = None
+    ) -> None:
+        """/clear(新 session)→ 重绑 ctx + session_id;/profile(切 provider)→ 重绑 parent_provider。
+
+        与 _AgentTool.rebind 同语义。deps.manager 由 SubagentManager.rebind 独立刷新(同一实例,
+        引用随之更新);root/worktree_name 随 cwd 不变。漏重绑则 /clear 后本工具仍指向旧 session
+        目录 → 续跑找不到新 session 的子 agent meta。也使 app._rebind_agent_tool 遍历 is_agent_tool
+        工具时不再因缺 rebind 抛 AttributeError(此前 /clear 会跳过其后的 manager/team 重绑)。
+        """
+        if ctx is not None:
+            self._deps.ctx = ctx
+            self._deps.session_id = ctx.session_id
+        if provider is not None:
+            self._deps.parent_provider = provider
 
     async def execute(self, *, agent_id: str, direction: str) -> str:  # type: ignore[override]
         result = await resume_subagent(

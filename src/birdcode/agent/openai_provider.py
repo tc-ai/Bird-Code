@@ -42,6 +42,18 @@ class _ToolBuf(TypedDict):
     json: str
 
 
+# OpenAI finish_reason → Anthropic 规范 stop_reason(侧链/交叉校验等跨 provider 统一判断)。
+# 旧实现 `else "end_turn"` 把 length(max_tokens 截断)/content_filter(内容过滤中止)也兜进
+# end_turn → 被截断/过滤的响应被误判"自然完成",续跑交叉校验会注入截断文本。故显式映射已知
+# 非自然终止值;仅 stop / 未知值才作 end_turn(自然完成)。与 anthropic_provider 的忠实透传对齐。
+_OPENAI_FINISH_REASON_MAP: dict[str, str] = {
+    "tool_calls": "tool_use",
+    "function_call": "tool_use",  # 旧式 function calling,语义同 tool_calls
+    "length": "max_tokens",  # 达到 max_tokens 截断(非自然完成)
+    "content_filter": "content_filter",  # 被内容过滤中止(非自然完成)
+}
+
+
 class OpenAIProvider(_BaseLLMProvider):
     def __init__(
         self,
@@ -216,7 +228,7 @@ class OpenAIProvider(_BaseLLMProvider):
             delta = getattr(choice, "delta", None)
             fr = getattr(choice, "finish_reason", None)
             if fr:
-                self._stop_reason = "tool_use" if fr == "tool_calls" else "end_turn"
+                self._stop_reason = _OPENAI_FINISH_REASON_MAP.get(fr, "end_turn")
                 # finish_reason 到达即流将结束,标 _finish_seen,由
                 # _finish_stream 钩子在流末尾补发 Done(若无 trailing usage)。
                 # 不在此直发,否则会抢在 trailing usage 之前发 usage=None 的 Done,

@@ -16,6 +16,8 @@ monkeypatch 成 fake),从而在单测里验完整闸门路径:confirm → submit
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
@@ -43,11 +45,16 @@ class _ForwardingController:
 
 
 class _GateApp(App):
-    """最小 App:#scroll 挂载点 + controller 属性(供 ResumePrompt.action_confirm 访问)。"""
+    """最小 App:#scroll 挂载点 + controller 属性(供 ResumePrompt.action_confirm 访问)。
+
+    含 _bg_tasks/_reap_bg_task(镜像 BirdApp):action_confirm 把 submit 作后台 task,
+    需 app 提供强引用容器 + 异常回收(done_callback),与生产 BirdApp 一致。
+    """
 
     def __init__(self, controller: _ForwardingController) -> None:
         super().__init__()
         self._ctrl = controller
+        self._bg_tasks: set[asyncio.Task] = set()
 
     def compose(self) -> ComposeResult:
         yield Vertical(id="scroll")
@@ -55,6 +62,13 @@ class _GateApp(App):
     @property
     def controller(self) -> _ForwardingController:
         return self._ctrl
+
+    def _reap_bg_task(self, task: asyncio.Task) -> None:
+        """镜像 BirdApp._reap_bg_task:回收引用 + 取走异常(免 'never retrieved' 警告)。"""
+        self._bg_tasks.discard(task)
+        if task.cancelled():
+            return
+        task.exception()  # retrieve(测试桩不 log)
 
 
 def _patch_resume(monkeypatch) -> dict:
@@ -139,6 +153,43 @@ def test_resume_prompt_has_confirm_binding():
     assert any(
         b.key == "enter" and b.action == "confirm" for b in ResumePrompt.BINDINGS
     )
+
+
+@pytest.mark.asyncio
+async def test_action_confirm_does_not_block_pump_on_long_submit():
+    """review #5 / 箭头键 bug:action_confirm 不得内联 await submit(否则阻塞消息泵)。
+
+    resume 经橙色 ResumePrompt 的 Enter → action_confirm → submit 触发整轮 agent,agent 会调
+    resume_agent 挂权限提示。若 action_confirm 内联 await submit,Textual 消息泵被占住 → 权限
+    提示无法响应任何按键(箭头/y/n/enter),且 resume_agent 在 await 权限 future(只能由按键
+    resolve)→ 死锁。修复:create_task 后台跑 submit,action_confirm 立即返回。
+
+    此处用「submit 永不完成」的 controller 验证:action_confirm 能返回(pilot.press 不卡死,
+    测试不超时)、submit 已调度进 _bg_tasks、widget 已移除。修复前内联 await 会让 pilot.press
+    挂起直至 never_done(永不),测试超时失败。
+    """
+
+    class _BlockingController:
+        def __init__(self) -> None:
+            self.submits: list[str] = []
+            self.gate = asyncio.Event()
+
+        async def submit(self, text: str) -> None:
+            self.submits.append(text)
+            await self.gate.wait()  # 模拟整轮 agent 永不完成
+
+    async with _GateApp(_BlockingController()).run_test(size=(80, 24)) as pilot:  # type: ignore[arg-type]
+        prompt = ResumePrompt([("sub-1", "任务")])
+        await pilot.app.query_one("#scroll").mount(prompt)
+        await pilot.pause()
+        prompt.focus()
+        # 若 action_confirm 内联 await submit,此行会挂起直到 gate.set()(永不)→ 测试超时。
+        await pilot.press("enter")
+        await pilot.pause()
+        # submit 已调度(进后台 task),action_confirm 已返回(widget 已移除)
+        assert pilot.app.controller.submits == ["继续"]
+        assert pilot.app._bg_tasks  # submit 跑在后台 task 里,未占住 pump  # noqa: SLF001
+        assert not list(pilot.app.query("ResumePrompt"))
 
 
 def test_resume_prompt_action_confirm_method_exists():

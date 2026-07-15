@@ -17,6 +17,16 @@ from birdcode.utils.logging import get_logger
 log = get_logger("birdcode.utils.worktree")
 
 
+def worktree_path(main_repo: Path, name: str) -> Path:
+    """worktree 目录路径 <main_repo>/.birdcode/worktrees/<name>。
+
+    单一来源:create_worktree(建)、_degrade_to_inject(清孤儿)、create_worktree 快速恢复
+    (探查)共用。路径方案一变(可配置根/迁址),只改此处,免得孤儿清理指向错路径 →
+    remove_worktree 静默 no-op 留孤儿。
+    """
+    return main_repo / ".birdcode" / "worktrees" / name
+
+
 def is_worktree(path: Path) -> bool:
     """path 是否是一个 git worktree 的根。
 
@@ -170,7 +180,7 @@ async def create_worktree(
         raise RuntimeError(
             f"--worktree 需在 git 仓库内使用: {main_repo} 无 .git"
         )
-    wt = main_repo / ".birdcode" / "worktrees" / name
+    wt = worktree_path(main_repo, name)
     branch = f"worktree-{name}"
     # 快速恢复:dir 在 + HEAD==worktree-<name> → 复用(不调 git);dir 在但状态不符 → 报错
     if wt.exists():

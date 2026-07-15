@@ -81,6 +81,41 @@ class SubagentStore:
         self._last_uuid = new_uuid
         return new_uuid
 
+    async def load_and_repair_sidechain(self, path: Path | None = None) -> list[Turn]:
+        """读侧链 + 末尾修复 + 【持久化合成消息】(镜像 SessionStore.load_mainline)。
+
+        续跑前由 runner 调:把 repair 补的合成 tool_result / 收尾 assistant 落盘,使再次中断的
+        侧链不再残留 orphan tool_use(否则 direction 追加后成中段 orphan → 二次中断后下轮 API 400
+        或 tool_use 被静默剥离)。返回 turns 末尾恒以 assistant 收尾、tool_use 全配对,可直接喂
+        run_agent_loop。文件不存在/全坏行 → [](无侧链 = 空历史)。
+
+        path 默认 None → 读 self._jsonl(本 store 写的侧链);runner 续跑传 self.resume_from(生产中
+        与 self._jsonl 同路径,二者由同组 ctx/project_root/agent_id 推导)。显式传 path 保留「从
+        resume_from 读」的语义(旧代码 load_sidechain_turns(self.resume_from) 的契约 + 回归测试)。
+        _last_uuid 先设为所读文件的叶子,使随后 append(合成消息 + direction)正确挂链。decode 按
+        文件序重放,parentUuid 不影响顺序。与 codec.load_sidechain_turns(只读,供 resume.py/app.py
+        探测)的区别:本方法持久化,只在「即将向侧链追加」的 runner 续跑路径调一次。
+        """
+        src = path if path is not None else self._jsonl
+        rows = codec._read_jsonl_rows(src)  # noqa: SLF001 - 同包内复用容错读
+        live = codec.split_live_segment(rows)
+        self._last_uuid = next((r.get("uuid") for r in reversed(live) if r.get("uuid")), None)
+        turns = codec.decode_lines(live)
+        synthetics = codec.repair_trailing_edge(
+            turns, error_message_fn=codec.conservative_sidechain_error_message
+        )
+        for msg in synthetics:
+            try:
+                await self.append(msg, is_assistant=(msg.role == "assistant"))
+            except Exception:  # noqa: BLE001 - 持久化失败不杀续跑,内存 turns 仍可用
+                log.exception("持久化侧链合成消息失败(内存 turns 仍可用)")
+                break
+        if not turns and rows:
+            log.warning(
+                "load_and_repair_sidechain: 侧链 jsonl 非空但 turns 为空,疑似加载截断(#15837 防御)"
+            )
+        return turns
+
     def close(self) -> None:
         try:
             self._fh.close()

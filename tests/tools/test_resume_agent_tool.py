@@ -70,3 +70,22 @@ def test_resume_agent_tool_metadata():
     assert ResumeAgentTool.parameters is ResumeAgentInput
     # name 是实例属性(每个 ResumeAgentTool 实例都同名,但不是 per-defn)
     assert isinstance(tool.name, str)
+
+
+def test_rebind_updates_ctx_session_id_and_provider():
+    """review #4:rebind 把 /clear 的新 ctx/session_id、/profile 的新 provider 传导到 deps。
+
+    修 #4 前:ResumeAgentTool 标了 is_agent_tool 却无 rebind → app._rebind_agent_tool 遍历调
+    tool.rebind 抛 AttributeError → 被 clear_conversation 的 except 吞 → 跳过其后的
+    manager.rebind / team.reset;且 /clear 后 deps 停留旧 session_id → 续跑找不到新 session 的 meta。
+    """
+    from birdcode.session.models import SessionContext
+
+    tool = _build_resume_tool()
+    assert tool._deps.session_id == "test-sid"  # noqa: SLF001 - 初始值
+    new_ctx = SessionContext(session_id="new-sid", cwd=".", version="", git_branch=None)
+    sentinel = object()
+    tool.rebind(ctx=new_ctx, provider=sentinel)  # type: ignore[arg-type]
+    assert tool._deps.session_id == "new-sid"  # noqa: SLF001
+    assert tool._deps.ctx is new_ctx  # noqa: SLF001
+    assert tool._deps.parent_provider is sentinel  # noqa: SLF001

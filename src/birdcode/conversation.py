@@ -51,6 +51,9 @@ class Message:
 class Turn:
     messages: list[Message] = field(default_factory=list)
     usage: TokenUsage | None = None
+    # 末条 assistant 的 stop_reason(decode 时取,与 usage 同源)。end_turn=自然完成;
+    # tool_use/max_tokens/stop_sequence 等=未完成。供 resume 交叉校验等判断轮次是否自然终止。
+    stop_reason: str | None = None
     interrupted: bool = False
     # wake 轮 provider 抛异常(超时/限流/5xx)时 _consume_wake 置 True;
     # _process_wake 据此跳过 dequeue(通知保持待响应、可重试)+ 不入 history(避免孤立 user turn)。

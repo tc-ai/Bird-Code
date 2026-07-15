@@ -327,12 +327,13 @@ def decode_lines(lines: list[dict[str, Any]]) -> list[Turn]:
     """纯解码(防御):行序列 → list[Turn]。不做末尾修复(见 repair_trailing_edge)。
 
     Turn 边界:含 TextBlock 的 user 行为起点;tool_result 回填的 user 行归入当前 Turn。
-    Turn.usage 取 Turn 内最后一条 assistant 行的 usage。残缺行/消息/块跳过(只告警),
-    单行损坏不致命;usage schema drift 容忍。
+    Turn.usage / Turn.stop_reason 取 Turn 内最后一条 assistant 行的对应字段。残缺行/消息/块
+    跳过(只告警),单行损坏不致命;usage schema drift 容忍。
     """
     turns: list[Turn] = []
     current: Turn | None = None
     last_usage: TokenUsage | None = None
+    last_stop_reason: str | None = None
 
     def _is_user_question(msg: Message) -> bool:
         return msg.role == "user" and any(isinstance(b, TextBlock) for b in msg.content)
@@ -346,6 +347,7 @@ def decode_lines(lines: list[dict[str, Any]]) -> list[Turn]:
         if _is_user_question(msg):
             if current is not None:
                 current.usage = last_usage
+                current.stop_reason = last_stop_reason
                 turns.append(current)
             current = Turn(messages=[msg])
         else:
@@ -356,15 +358,20 @@ def decode_lines(lines: list[dict[str, Any]]) -> list[Turn]:
                 current.messages.append(msg)
         if msg.role == "assistant":
             m = obj.get("message")
-            u = m.get("usage") if isinstance(m, dict) else None
-            if isinstance(u, dict):
-                try:
-                    # model_validate 容忍 extra 字段;try 兜住类型漂移/null 不杀解码。
-                    last_usage = TokenUsage.model_validate(u)
-                except Exception:
-                    log.warning("跳过坏 usage(类型漂移): %s", str(u)[:80])
+            if isinstance(m, dict):
+                u = m.get("usage")
+                if isinstance(u, dict):
+                    try:
+                        # model_validate 容忍 extra 字段;try 兜住类型漂移/null 不杀解码。
+                        last_usage = TokenUsage.model_validate(u)
+                    except Exception:
+                        log.warning("跳过坏 usage(类型漂移): %s", str(u)[:80])
+                sr = m.get("stop_reason")
+                if isinstance(sr, str):
+                    last_stop_reason = sr
     if current is not None:
         current.usage = last_usage
+        current.stop_reason = last_stop_reason
         turns.append(current)
     return turns
 

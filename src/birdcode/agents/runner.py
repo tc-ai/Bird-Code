@@ -22,7 +22,6 @@ from birdcode.config.schema import AppConfig, ProviderProfile
 from birdcode.conversation import Message, Turn
 from birdcode.permission.gate import PermissionGate
 from birdcode.session import paths
-from birdcode.session.codec import load_sidechain_turns
 from birdcode.session.models import SessionContext, SubagentMeta
 from birdcode.session.subagent_meta import read_subagent_meta, write_subagent_meta
 from birdcode.session.subagent_store import SubagentStore
@@ -280,16 +279,23 @@ class SubagentRunner:
             self.ctx.session_id, self.project_root, self.agent_id,
             worktree_name=self._worktree_name,
         )
-        write_subagent_meta(
-            meta_path,
-            SubagentMeta(
-                agentId=self.agent_id, agentType=self.defn.name, description=self.description,
-                toolUseId=self.tool_use_id, spawnDepth=self.spawn_depth, isAsync=self.is_async,
-                model=self.defn.model, status="launched", spawnedAt=utc_iso(),
-                resolvedModel=None, completedAt=None, totalDurationMs=None, totalTokens=None,
-                prompt=self.prompt, isolation=self.isolation, baseSha=None,
-            ),
-        )
+        # #3:续跑保留旧 meta(原任务描述/派生时间/worktree 起点),仅靠下方 _update_meta 刷 status;
+        # 若此处仍无条件 write(launched),prompt 会被覆写成 direction(=self.prompt,如"继续"——
+        # reminder/可续跑清单就显示"继续"而非原任务)、spawnedAt 重置(计费丢首次派生时间)、
+        # baseSha=None(worktree 续跑把首跑已 commit 的推进当起点 → 产物清单残缺)。旧 meta 缺失
+        # (损坏/手工删)→ 回退写 fresh,使生命周期跟踪仍可用。
+        resume_existing = read_subagent_meta(meta_path) if self.resume_from is not None else None
+        if resume_existing is None:
+            write_subagent_meta(
+                meta_path,
+                SubagentMeta(
+                    agentId=self.agent_id, agentType=self.defn.name, description=self.description,
+                    toolUseId=self.tool_use_id, spawnDepth=self.spawn_depth, isAsync=self.is_async,
+                    model=self.defn.model, status="launched", spawnedAt=utc_iso(),
+                    resolvedModel=None, completedAt=None, totalDurationMs=None, totalTokens=None,
+                    prompt=self.prompt, isolation=self.isolation, baseSha=None,
+                ),
+            )
         store = SubagentStore(self.ctx, self.project_root, self.agent_id, root=self.root)
         state = {"tokens": 0, "input_tokens": 0, "tool_use_count": 0}
         error_msg: str | None = None  # 护栏/Provider Error 的消息(_emit 写,run() 读)
@@ -364,7 +370,9 @@ class SubagentRunner:
             tick_task = asyncio.create_task(_progress_tick())
         # Phase 2 worktree 生命周期局部(init before try → finally 可引用)
         worktree_dir: Path | None = None
-        base_sha = ""
+        # #3:续跑沿用旧 meta 的 worktree 起点 → collect 的净改变含首跑推进(产物清单完整);
+        # 首跑 / 旧 meta 缺 base → ""(下文 worktree 块派生)。
+        base_sha = (resume_existing.base_sha or "") if resume_existing is not None else ""
         _cwd_token: contextvars.Token[str | None] | None = None
         succeeded = False
         report: SubagentReport | None = None  # 终态报告;cancelled 分支留 None→raise
@@ -380,8 +388,10 @@ class SubagentRunner:
                 _cwd_token = _AGENT_CWD.set(str(worktree_dir))
                 # 记 worktree 起点 sha(本次开始前 HEAD;复用路径下=本次开始前状态)。
                 # finally 头据此收集本次净改变。失败 → ""(collect 降级 [])。
-                base_sha = await current_head_sha(worktree_dir) or ""
-                _update_meta(meta_path, baseSha=base_sha)  # 供续跑收产物清单
+                # #3:续跑已沿用旧 meta 的 base_sha(上方),不重派生——否则把首跑推进当起点。
+                if not base_sha:
+                    base_sha = await current_head_sha(worktree_dir) or ""
+                    _update_meta(meta_path, baseSha=base_sha)  # 供续跑收产物清单
             profile = resolve_profile(
                 self.defn.model, self.model_override, self.cfg, self.parent_provider
             )
@@ -426,7 +436,13 @@ class SubagentRunner:
                 # (规避 Claude Code #11712:resume 必须把用户新方向作为真实 user turn,
                 # 而非靠推断旧回复)。跳过 fresh 播种(history 已有旧首 turn)。
                 _update_meta(meta_path, status="running")  # 标记已重新在跑(供 T19 幂等守卫)
-                history = load_sidechain_turns(self.resume_from)
+                # #2:经 store 加载+末尾修复+【持久化合成消息】(镜像 SessionStore.load_mainline)。
+                # 仅内存修复会让磁盘侧链残留 orphan tool_use(中断期未落盘的 tool_result),
+                # direction 追加后变成中段 orphan;二次中断 → decode 切多 Turn、repair 只看
+                # turns[-1] → 下轮 API 400 或 tool_use 被静默剥离(子 agent 不知自己发过 bash,
+                # 可能重做副作用)。传 self.resume_from 保留「从 resume_from 读」的契约(生产中
+                # 与 store._jsonl 同路径)。
+                history = await store.load_and_repair_sidechain(self.resume_from)
                 turn = Turn(messages=[Message(role="user", content=[TextBlock(text=self.prompt)])])
                 await store.append(turn.messages[0])
             else:
@@ -483,7 +499,7 @@ class SubagentRunner:
                 )
             else:
                 report_text = _final_assistant_text(turn)
-                is_completed = not report_text.lstrip().startswith("## 待办清单")
+                is_completed = is_terminal_report_text(report_text)
                 # #10:teammate duration=active_ms(不含 idle park);一次性=墙钟(started)
                 duration = active_ms if self.mailbox is not None else _elapsed_ms(started)
                 report = SubagentReport(
@@ -550,6 +566,22 @@ class SubagentRunner:
                     raise  # 无报告(本就被取消):维持取消语义上传
         assert report is not None  # cancelled 分支已 raise;completed/error 已赋值
         return report
+
+
+# 子 agent「进行中」报告的魔法前缀(runner 写的中途快照 "## 待办清单 ...")。
+# runner 完成判定与 resume 交叉校验(_sidechain_looks_complete)共用此常量,避免两处分叉
+# (曾致 review #1:resume 漏过滤 synthetic 占位,把进行中的「## 待办清单」翻转成「已完成」)。
+_TERMINAL_REPORT_PREFIX = "## 待办清单"
+
+
+def is_terminal_report_text(text: str) -> bool:
+    """子 agent 报告正文是否表示【已完成】(非进行中的待办清单)。
+
+    runner 中途会把进行状态写成形如「## 待办清单\\n- step」的快照——以此为前缀 → 返 False
+    (未完成);其余(含空文本)→ True(完成)。空文本语义因调用方而异:runner 视空报告为
+    完成(返 True);resume 的 _sidechain_looks_complete 自行先判空返 False,再调本函数。
+    """
+    return not text.lstrip().startswith(_TERMINAL_REPORT_PREFIX)
 
 
 def _final_assistant_text(turn: Turn) -> str:

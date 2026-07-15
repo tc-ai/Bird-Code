@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 from birdcode.agents.manager import SubagentManager
-from birdcode.agents.runner import SubagentRunner
-from birdcode.blocks import TextBlock
+from birdcode.agents.runner import SubagentRunner, is_terminal_report_text
+from birdcode.blocks import TextBlock, ToolUseBlock
 from birdcode.conversation import Message, Turn
 from birdcode.session.codec import load_sidechain_turns
 from birdcode.session.models import SubagentMeta
@@ -23,7 +23,7 @@ from birdcode.session.paths import subagent_jsonl_path, subagent_meta_path
 from birdcode.session.subagent_meta import read_subagent_meta, write_subagent_meta
 from birdcode.session.timeutil import utc_iso
 from birdcode.utils.logging import get_logger
-from birdcode.utils.worktree import create_worktree, remove_worktree
+from birdcode.utils.worktree import create_worktree, remove_worktree, worktree_path
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -76,6 +76,18 @@ async def resume_subagent(*, agent_id: str, direction: str, deps: ResumeDeps) ->
     if meta is None:
         return ResumeResult(outcome="sync_done", text=f"无法续跑:{agent_id} 的 meta 缺失或损坏")
 
+    # 显式 completed 拒绝续跑:discover 不会列出 completed,但主 agent 可能被陈旧 reminder
+    # (一次性注入、不随 meta 刷新)误导而对【已完成】agent 调 resume_agent。此前无此守卫 → T17
+    # 只管「侧链像终态」的启发式,显式 completed 会落到构造 runner + run() → 把已完成 agent 从头
+    # 重跑(配合旧 meta 被覆写成 direction,连原任务都丢)。completed 已无未完成工作可续,拒绝
+    # 严格正确(legitimate 续跑不会指向 completed——reminder 只列非终态)。error(可重试)/
+    # cancelled(用户显式中断)仍可续。
+    if meta.status == "completed":
+        return ResumeResult(
+            outcome="sync_done",
+            text=f"{agent_id} 已完成,无需续跑",
+        )
+
     if deps.manager.has_live(agent_id):  # 幂等:已在跑,不重复 launch
         return ResumeResult(outcome="in_progress", text=f"{agent_id} 已在运行中")
 
@@ -104,8 +116,11 @@ async def resume_subagent(*, agent_id: str, direction: str, deps: ResumeDeps) ->
     if meta.isolation == "worktree":
         try:
             await create_worktree(deps.project_root, agent_id)
-        except FileExistsError as e:
-            log.warning("worktree %s 状态不符无法自愈,降级注入:%s", agent_id, e)
+        except (FileExistsError, RuntimeError) as e:
+            # FileExistsError=状态不符(分支被改/detached);RuntimeError=无 .git / git worktree
+            # add 失败(锁竞争/磁盘满/索引损坏)。两者都降级注入 + 清孤儿,不冒泡成工具异常
+            # (write 工具契约:返回友好文本而非抛)。
+            log.warning("worktree %s 状态不符/创建失败,降级注入:%s", agent_id, e)
             return await _degrade_to_inject(meta, deps, agent_id, sidechain)
 
     # 空侧链检查(T18):侧链无任何真实 assistant 产出(子 agent 死太早:只有种子 user、缺文件、
@@ -198,7 +213,11 @@ def _read_sidechain_final_text(sidechain_path: Path) -> str | None:
         return None
     for turn in reversed(turns):
         for msg in reversed(turn.messages):
-            if msg.role != "assistant":
+            # 跳过 synthetic 占位/收尾(repair 补的「(上一轮因会话中断…已自动补全收尾)」):
+            # 否则进行中侧链 [seed, assistant("## 待办清单…", tool_use_X)] 经 repair 末尾补一条
+            # synthetic assistant 占位 → 本函数命中占位 → _sidechain_looks_complete 误判「像终态」
+            # → 把进行中真实产出当完成注入、不续跑。与 _has_assistant_output 同用 not synthetic。
+            if msg.role != "assistant" or msg.synthetic:
                 continue
             for b in msg.content:
                 if isinstance(b, TextBlock) and b.text:
@@ -207,21 +226,48 @@ def _read_sidechain_final_text(sidechain_path: Path) -> str | None:
 
 
 def _sidechain_looks_complete(sidechain_path: Path) -> bool:
-    """侧链最后 assistant 文本是否像终态报告(交叉校验:meta 可能未及时刷成 completed)。
+    """侧链是否像【自然完成】的报告(交叉校验:meta 可能未及时刷成 completed)。
 
-    镜像 runner.py:486 的完成判据(`is_completed = not text.lstrip().startswith("## 待办清单")`):
-    有实质报告文本(非空/非纯空白)且不以 "## 待办清单" 开头 → 视为完成;无文本 / 以
-    "## 待办清单" 开头 → 未完成。
+    首选【权威信号】:末轮 ``stop_reason``(`decode_lines`` 从末条真实 assistant 行回填到 Turn)。
+    - ``end_turn``:模型自然结束本轮(纯文本收尾、无待执工具)→ 视为完成、注入不续跑。
+    - ``tool_use`` / ``max_tokens`` / ``stop_sequence`` 等:停在调工具/截断/停序列 → 未完成 → 续跑。
+    这正是 API 的完成语义,远比"看文本是否以 ## 待办清单 开头"可靠(后者无法区分中间过渡文本与
+    终态报告——实测 explore 子 agent 死在 grep 中途,末条 assistant 是 [过渡文本 + tool_use]、
+    stop_reason=tool_use,旧文本启发式误判完成、注入占位吞掉产出)。
 
-    保守取向(task-17 brief Step 2 末句"判不准→注入更安全"):本函数只在"有实质文本 + 非待办
-    清单头"时返 True;无文本 / 有待办清单头 → 返 False(走续跑)。即:只有明确像终态报告才
-    注入不续跑;runner 自身的进行中标志("## 待办清单")和无产出情况仍续跑(false negative
-    可接受 —— 把真完成当未完成重跑只是浪费,把真未完成当完成丢产出更糟,故判不准→注入)。
+    回退(无 stop_reason:其它 provider 不发 / 旧会话缺字段):末条真实 assistant 含 tool_use → 中途;
+    否则用文本启发式(非「## 待办清单」头 → 像完成)。即 stop_reason 缺席时退回 tool_use 代理 +
+    文本判据。
+
+    取向:判不准→【续跑】。把真完成当未完成重跑只是浪费;把真未完成当完成(注入占位)会丢产出——
+    更糟。文本判据与 runner 共用 ``is_terminal_report_text``(单一来源)。
     """
-    text = _read_sidechain_final_text(sidechain_path)
-    if not text or not text.strip():
+    turns = _load_sidechain_turns_safe(sidechain_path)
+    last_real_asst: Message | None = None
+    for turn in reversed(turns):
+        for msg in reversed(turn.messages):
+            if msg.role == "assistant" and not msg.synthetic:
+                last_real_asst = msg
+                break
+        if last_real_asst is not None:
+            break
+    if last_real_asst is None:
+        return False  # 无真实 assistant(_has_assistant_output 已更早拦截,此处兜底)
+    # 权威:末轮 stop_reason = 末条真实 assistant 的 stop_reason(end_turn=自然完成)。
+    stop_reason = turns[-1].stop_reason if turns else None
+    if stop_reason is not None:
+        return stop_reason == "end_turn"
+    # 回退:无 stop_reason —— tool_use 代理(末条 assistant 含 tool_use → 中途 → 续跑)。
+    if any(isinstance(b, ToolUseBlock) for b in last_real_asst.content):
         return False
-    return not text.lstrip().startswith("## 待办清单")
+    text = ""
+    for b in last_real_asst.content:
+        if isinstance(b, TextBlock) and b.text:
+            text = b.text
+            break
+    if not text.strip():
+        return False
+    return is_terminal_report_text(text)
 
 
 async def _inject_task_notification(
@@ -352,8 +398,8 @@ async def _degrade_to_inject(
     # 标终态:worktree 状态不符属异常,与上方 report.status / queue-operation status 一致标 error。
     # 不选 cancelled(cancelled 是可续跑状态,会继续被 discover 列为可续跑;且语义是用户中断,不符)。
     _mark_meta_terminal(meta, deps, agent_id, status="error")
-    # force 清孤儿 worktree(状态不符,可能脏/锁)
-    wt_path = deps.project_root / ".birdcode" / "worktrees" / agent_id
+    # force 清孤儿 worktree(状态不符,可能脏/锁)。路径经 worktree_path 单一来源(与 create 一致)。
+    wt_path = worktree_path(deps.project_root, agent_id)
     try:
         await remove_worktree(deps.project_root, wt_path, force=True)
     except Exception:  # noqa: BLE001 - 清理失败不杀降级路径

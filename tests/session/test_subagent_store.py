@@ -72,3 +72,54 @@ async def test_append_io_failure_does_not_raise(tmp_path):
     sa._fh.close()  # noqa: SLF001
     await sa.append(Message(role="user", content=[TextBlock(text="x")]))  # 不抛
     sa.close()
+
+
+async def test_load_and_repair_persists_synthetics_then_idempotent(tmp_path):
+    """review #2:load_and_repair_sidechain 落盘 repair 合成消息(镜像 mainline)。
+
+    侧链末尾 unpaired tool_use → repair 补合成 tool_result + 合成 assistant。修 #2 前:仅内存
+    修复,磁盘残留 orphan;direction 追加后成中段 orphan,二次中断后下轮 API 400。修后:合成消息
+    落盘,再读稳定(幂等)。
+    """
+    p = _subagent_jsonl(tmp_path, agent_id="a1")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # 写带 uuid 的真实侧链(user + assistant 含 unpaired tool_use)。
+    p.write_text(
+        "\n".join([
+            json.dumps({
+                "type": "user", "uuid": "u1", "parentUuid": None,
+                "message": {"role": "user", "content": [{"type": "text", "text": "q"}]},
+            }),
+            json.dumps({
+                "type": "assistant", "uuid": "u2", "parentUuid": "u1",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "tu1", "name": "bash", "input": {}}],
+                },
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    sa = SubagentStore(_ctx(), tmp_path, "a1", root=tmp_path)
+    turns = await sa.load_and_repair_sidechain()
+    sa.close()
+
+    # turns 末尾以 assistant 收尾、tool_use 已配对
+    assert turns[-1].messages[-1].role == "assistant"
+
+    rows = [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    # 原 2 行 + 合成 tool_result + 合成 assistant = 4 行
+    assert len(rows) == 4
+    # 合成行标 synthetic=true(供 _has_assistant_output / _read_sidechain_final_text 跳过)
+    assert rows[2]["synthetic"] is True
+    assert rows[3]["synthetic"] is True
+    # 合成 tool_result 链到前一行 uuid(_last_uuid 先设为侧链叶子,非误置 null)
+    assert rows[2]["parentUuid"] == rows[1]["uuid"]
+
+    # 幂等:再 load 不再追加(orphans 已配对)
+    sa2 = SubagentStore(_ctx(), tmp_path, "a1", root=tmp_path)
+    await sa2.load_and_repair_sidechain()
+    sa2.close()
+    rows2 = [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(rows2) == 4

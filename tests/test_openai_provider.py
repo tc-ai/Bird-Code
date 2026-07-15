@@ -250,6 +250,38 @@ async def test_done_emitted_on_finish_reason_without_trailing_usage():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("finish_reason", "expected_stop"),
+    [
+        ("stop", "end_turn"),  # 自然完成
+        ("tool_calls", "tool_use"),  # 调工具
+        ("length", "max_tokens"),  # max_tokens 截断(修复前被错映射成 end_turn)
+        ("content_filter", "content_filter"),  # 内容过滤(修复前被错映射成 end_turn)
+    ],
+)
+async def test_finish_reason_mapped_to_canonical_stop_reason(finish_reason, expected_stop):
+    """OpenAI finish_reason → Anthropic 规范 stop_reason(跨 provider 统一)。
+
+    修复前 `else "end_turn"` 把 length/content_filter 兜进 end_turn → 截断/过滤的响应被续跑
+    交叉校验误判"自然完成"、注入截断文本。修复后显式映射;仅 stop/未知 → end_turn。
+    """
+    finish_chunk = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(content=None), finish_reason=finish_reason
+            )
+        ],
+        usage=None,
+    )
+    chunks = [_chunk(content="hi"), finish_chunk]
+    app, prof = _app()
+    p = OpenAIProvider(prof, app, client=FakeOpenAI(chunks))
+    out = [e async for e in p.stream([Message(role="user", content=[TextBlock("x")])], history=[])]
+    assert isinstance(out[-1], Done)
+    assert out[-1].stop_reason == expected_stop
+
+
+@pytest.mark.asyncio
 async def test_usage_parses_cached_tokens():
     """trailing usage 携带 prompt_tokens_details.cached_tokens → cache_read_tokens。"""
     details = SimpleNamespace(cached_tokens=800)

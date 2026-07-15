@@ -133,17 +133,24 @@ def _write_meta(
     )
 
 
-def _write_sidechain(tmp_path: Path, agent_id: str, *, text: str) -> Path:
-    """写一条配对 user+assistant 的侧链(供 _read_sidechain_final_text 读最后 assistant 文本)。"""
+def _write_sidechain(
+    tmp_path: Path, agent_id: str, *, text: str, stop_reason: str | None = None,
+) -> Path:
+    """写一条配对 user+assistant 的侧链(供 _read_sidechain_final_text 读最后 assistant 文本)。
+
+    stop_reason 非空时写入 assistant 行的 message.stop_reason(模拟真实落盘),供交叉校验主路径。
+    """
     p = subagent_jsonl_path(tmp_path, "s1", tmp_path, agent_id)
     user_line = json.dumps({
         "type": "user",
         "message": {"role": "user", "content": [{"type": "text", "text": "原任务"}]},
     })
-    asst_line = json.dumps({
-        "type": "assistant",
-        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
-    })
+    asst_msg: dict[str, object] = {
+        "role": "assistant", "content": [{"type": "text", "text": text}],
+    }
+    if stop_reason is not None:
+        asst_msg["stop_reason"] = stop_reason
+    asst_line = json.dumps({"type": "assistant", "message": asst_msg})
     p.write_text("\n".join([user_line, asst_line]) + "\n", encoding="utf-8")
     return p
 
@@ -172,7 +179,9 @@ async def test_nonterminal_meta_but_sidechain_terminal_injects_not_resumes(
     """
     _FakeRunner.constructed.clear()
     _write_meta(tmp_path, agent_id="sub-x1", status="running", is_async=True, isolation=None)
-    _write_sidechain(tmp_path, "sub-x1", text="任务已完成:共修了 3 个测试,全部通过。")
+    _write_sidechain(
+        tmp_path, "sub-x1", text="任务已完成:共修了 3 个测试,全部通过。", stop_reason="end_turn",
+    )
 
     store = _FakeStore()
     controller = _FakeController()
@@ -238,17 +247,20 @@ async def test_sidechain_with_todo_list_header_resumes(
     assert result.outcome == "async_launched"
 
 
-# ---- 边界:terminal meta(completed)+ 侧链像终态 → 不触发交叉校验,走正常续跑派发 ----
+# ---- 边界:completed meta + 显式 resume → 拒绝续跑(不重跑、不注入)----
 
 
 @pytest.mark.asyncio
-async def test_terminal_meta_does_not_trigger_crosscheck_inject(
+async def test_completed_meta_refused_not_rerun(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """meta status=completed(终态)+ 侧链像终态 → 交叉校验不触发(本路径只管 meta 非终态的不一致)。
+    """meta status=completed + 显式 resume_agent → 拒绝(不重跑、不注入)。
 
-    即便 sidechain 看起来已完成,terminal meta 不属 T17 职责 → 走正常派发(launch_async)。
-    回归红线:交叉校验门控必须含"meta 非终态"条件,不在 terminal meta 上误燃。
+    completed agent 已无未完成工作;唯一会指向它的路径是陈旧 reminder(注入后不随 meta 刷新)
+    误导主 agent 再调 resume_agent。此前 completed 会落到构造 runner + run() 把已完成 agent
+    从头重跑(配合旧 meta 被覆写成 direction,连原任务都丢)。completed 守卫在交叉校验之前
+    拦截:不构造 runner、不 launch、不注入,返回 sync_done。交叉校验门控仍含「meta 非终态」
+    条件(此处更前已挡);error/cancelled 仍可续(此处不拦)。
     """
     _FakeRunner.constructed.clear()
     _write_meta(tmp_path, agent_id="sub-x4", status="completed", is_async=True, isolation=None)
@@ -263,11 +275,13 @@ async def test_terminal_meta_does_not_trigger_crosscheck_inject(
         agent_id="sub-x4", direction="继续", deps=_deps(tmp_path, manager=mgr),
     )
 
-    # 走正常派发(未触发交叉校验注入)
-    assert len(_FakeRunner.constructed) == 1
-    assert len(mgr.launched) == 1
+    # 拒绝续跑:不构造 runner、不 launch、不注入、不唤醒
+    assert _FakeRunner.constructed == []
+    assert mgr.launched == []
     assert store.calls == []
-    assert result.outcome == "async_launched"
+    assert controller.woken == 0
+    assert result.outcome == "sync_done"
+    assert "完成" in result.text
 
 
 # ---- Final review fix:注入完成后 meta 必须刷终态,避免重复注入 + discover 永久列出 ----
@@ -369,3 +383,166 @@ async def test_inject_as_completed_removes_from_discover(
     # 注入后:discover 不再列出(completed 非可续跑)
     after = [m.agent_id for m in find_resumable_subagents(sub_dir)]
     assert "sub-t3" not in after
+
+
+# ---- review #1:synthetic 占位不得翻转「进行中」判决 ----
+
+
+@pytest.mark.asyncio
+async def test_midtool_todo_list_not_misjudged_completed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """review #1:侧链以 [user, assistant("## 待办清单…", tool_use_X)] 中断(典型 mid-tool)。
+
+    repair_trailing_edge 先补 synthetic tool_result_X(user),末尾变 user 又补 synthetic
+    assistant 占位「(上一轮因会话中断…已自动补全收尾)」。修 #1 前:_read_sidechain_final_text
+    命中末尾 synthetic 占位(非「## 待办清单」头)→ _sidechain_looks_complete 误判完成 →
+    把占位当完成报告注入、不续跑(吞掉进行中的真实产出)。修后:跳过 synthetic,读到真实
+    「## 待办清单」→ 未完成 → 走续跑(构造 runner + launch)。讽刺点:若读到的是真实文本,
+    它以「## 待办清单」开头本就会正确判 False 续跑——synthetic 漏过滤把正确决策翻转成错误。
+    """
+    _FakeRunner.constructed.clear()
+    _write_meta(tmp_path, agent_id="sub-x5", status="running", is_async=True, isolation=None)
+    p = subagent_jsonl_path(tmp_path, "s1", tmp_path, "sub-x5")
+    p.write_text(
+        "\n".join([
+            json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": "做任务"}]},
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "## 待办清单\n- [ ] 还没做完"},
+                        {
+                            "type": "tool_use", "id": "toolu_mid",
+                            "name": "bash", "input": {"cmd": "ls"},
+                        },
+                    ],
+                },
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    store = _FakeStore()
+    controller = _FakeController()
+    mgr = _FakeManager(store=store, controller=controller)
+    monkeypatch.setattr(resume_mod, "SubagentRunner", _FakeRunner)
+
+    result = await resume_subagent(
+        agent_id="sub-x5", direction="继续", deps=_deps(tmp_path, manager=mgr),
+    )
+
+    # 进行中(## 待办清单)→ 走续跑,不当完成注入
+    assert len(_FakeRunner.constructed) == 1
+    assert len(mgr.launched) == 1
+    assert store.calls == []
+    assert controller.woken == 0
+    assert result.outcome == "async_launched"
+
+
+@pytest.mark.asyncio
+async def test_midtool_intermediate_text_not_misjudged_completed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """硬中断 mid-tool:末条 assistant 是【过渡文本(非 ## 待办清单)+ tool_use】→ 必须续跑。
+
+    实测场景:explore 子 agent 死在 grep 中途,侧链末条 = [thinking + "再查一下谁调用了…"
+    + grep tool_use×2](紧随的 tool_result 写一半被杀、成半截行)。旧 _sidechain_looks_complete
+    只看文本:"再查一下…" 不以 ## 待办清单 开头 → is_terminal_report_text=True → 误判完成 →
+    注入占位、标 completed,吞掉进行中的探索产出。修后:末条真实 assistant 含 tool_use → 续跑。
+    """
+    _FakeRunner.constructed.clear()
+    _write_meta(tmp_path, agent_id="sub-x6", status="running", is_async=True, isolation=None)
+    p = subagent_jsonl_path(tmp_path, "s1", tmp_path, "sub-x6")
+    p.write_text(
+        "\n".join([
+            json.dumps({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "探索 memory 模块"}],
+                },
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {"type": "text", "text": "再查一下外部谁调用了 memory 模块的核心类。"},
+                        {
+                            "type": "tool_use", "id": "call_g1", "name": "grep",
+                            "input": {"pattern": "MemoryManager"},
+                        },
+                        {
+                            "type": "tool_use", "id": "call_g2", "name": "grep",
+                            "input": {"pattern": "GovernanceManager"},
+                        },
+                    ],
+                },
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    store = _FakeStore()
+    controller = _FakeController()
+    mgr = _FakeManager(store=store, controller=controller)
+    monkeypatch.setattr(resume_mod, "SubagentRunner", _FakeRunner)
+
+    result = await resume_subagent(
+        agent_id="sub-x6", direction="继续", deps=_deps(tmp_path, manager=mgr),
+    )
+
+    # mid-tool(末条 assistant 含 tool_use)→ 续跑,不注入
+    assert len(_FakeRunner.constructed) == 1
+    assert len(mgr.launched) == 1
+    assert store.calls == []
+    assert controller.woken == 0
+    assert result.outcome == "async_launched"
+
+
+@pytest.mark.asyncio
+async def test_non_end_turn_stop_reasons_resume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """stop_reason 非 end_turn(max_tokens 截断)→ 续跑(仅 end_turn 算自然完成)。
+
+    守护:完成判据是 ``stop_reason == "end_turn"``,而非"非 tool_use"——故 max_tokens /
+    stop_sequence 等其它非自然终止也走续跑,不被文本启发式误判完成。
+    """
+    _FakeRunner.constructed.clear()
+    _write_meta(tmp_path, agent_id="sub-x7", status="running", is_async=True, isolation=None)
+    _write_sidechain(
+        tmp_path, "sub-x7", text="生成到一半被 max_tokens 截断的报告……", stop_reason="max_tokens",
+    )
+
+    store = _FakeStore()
+    controller = _FakeController()
+    mgr = _FakeManager(store=store, controller=controller)
+    monkeypatch.setattr(resume_mod, "SubagentRunner", _FakeRunner)
+
+    result = await resume_subagent(
+        agent_id="sub-x7", direction="继续", deps=_deps(tmp_path, manager=mgr),
+    )
+
+    assert len(mgr.launched) == 1
+    assert store.calls == []
+    assert result.outcome == "async_launched"
+
+
+# ---- review #12:完成判据单一来源 helper ----
+
+
+def test_is_terminal_report_text_helper():
+    """review #12:is_terminal_report_text 单一来源(runner 完成判定 + resume 交叉校验共用)。"""
+    from birdcode.agents.runner import is_terminal_report_text
+
+    assert is_terminal_report_text("任务完成:全部通过") is True
+    assert is_terminal_report_text("## 待办清单\n- step") is False  # 进行中标志
+    assert is_terminal_report_text("  ## 待办清单") is False  # lstrip 容忍前导空白
+    assert is_terminal_report_text("") is True  # runner 视空报告为完成(resume 自行先判空)

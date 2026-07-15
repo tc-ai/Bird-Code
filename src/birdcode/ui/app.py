@@ -934,6 +934,11 @@ class BirdApp(App[None]):
             tool = reg.get(name)
             if tool is None or not getattr(tool, "is_agent_tool", False):
                 continue
+            # 守卫:仅调确实有 rebind 的工具(防御未来新增 is_agent_tool 工具漏实现 rebind →
+            # 抛 AttributeError 被 clear_conversation 的 except 吞掉,跳过其后的 manager/team 重绑)。
+            rebind = getattr(tool, "rebind", None)
+            if not callable(rebind):
+                continue
             if ctx is not None:
                 tool.rebind(ctx=ctx)
             if provider is not None:
