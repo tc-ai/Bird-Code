@@ -104,3 +104,63 @@ def test_read_description_and_name() -> None:
     assert "读取" in d  # 核心作用
     assert "行号" in d  # cat -n 式带行号
     assert ReadTool.name == "read_file"
+
+
+def test_set_tool_results_dir_sets_attr(tmp_path: Path) -> None:
+    """set_tool_results_dir 注入会话 tool-results 目录(供尺寸闸豁免判定)。"""
+    tool = ReadTool()
+    assert tool._tool_results_dir is None  # 默认 None
+    tool.set_tool_results_dir(tmp_path)
+    assert tool._tool_results_dir == tmp_path
+
+
+def test_fork_for_child_does_not_propagate_tool_results_dir(tmp_path: Path) -> None:
+    """fork_for_child 不透传 _tool_results_dir:子 agent sidecar 目录与父不同,
+    且子 agent 无 compaction 不产生 sidecar → 子实例默认 None。"""
+    tool = ReadTool()
+    tool.set_tool_results_dir(tmp_path)
+    child = tool.fork_for_child(cwd=str(tmp_path))
+    assert child._tool_results_dir is None
+
+
+async def test_oversized_sidecar_under_tool_results_dir_is_paginated(tmp_path: Path) -> None:
+    """sidecar(在 tool-results 目录下)>500KB → 不拒,分页读回 + inline 截断兜底。
+
+    Tier1 落盘的大输出需能被 read_file 按需读回(demand-paging);豁免仅跳过尺寸闸,
+    进 context 的量仍由 limit/_MAX_INLINE_CHARS 限定。
+    """
+    from birdcode.tools.read_tool import _MAX_READ_BYTES
+
+    sidecar_dir = tmp_path / "tool-results"
+    sidecar_dir.mkdir()
+    f = sidecar_dir / "toolu_big.txt"
+    f.write_bytes(b"x" * (_MAX_READ_BYTES + 1024))  # 超 500KB
+    tool = ReadTool()
+    tool.set_tool_results_dir(sidecar_dir)
+    out = await tool.execute(file_path=str(f), limit=10)
+    assert "<error>" not in out or "文件过大" not in out  # 不被尺寸闸拒
+    assert "1\t" in out  # 读到内容(行号 1)
+
+
+async def test_oversized_non_sidecar_still_rejected(tmp_path: Path) -> None:
+    """非 sidecar 路径(不在 tool-results 目录下)>500KB → 仍拒(行为不变)。"""
+    from birdcode.tools.read_tool import _MAX_READ_BYTES
+
+    f = tmp_path / "big.txt"
+    f.write_bytes(b"x" * (_MAX_READ_BYTES + 1024))
+    tool = ReadTool()
+    tool.set_tool_results_dir(tmp_path / "tool-results")  # 指向另一目录
+    out = await tool.execute(file_path=str(f))
+    assert "<error>" in out and "文件过大" in out  # 仍拒
+
+
+async def test_oversized_no_dir_no_exemption(tmp_path: Path) -> None:
+    """_tool_results_dir=None(未启用持久化)→ 无豁免,行为同今天。"""
+    from birdcode.tools.read_tool import _MAX_READ_BYTES
+
+    f = tmp_path / "big.txt"
+    f.write_bytes(b"x" * (_MAX_READ_BYTES + 1024))
+    tool = ReadTool()
+    assert tool._tool_results_dir is None
+    out = await tool.execute(file_path=str(f))
+    assert "<error>" in out and "文件过大" in out

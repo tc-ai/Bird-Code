@@ -52,9 +52,25 @@ class ReadTool(Tool):
         # per-agent cwd。worktree 子 agent 经 fork_for_child 注入 worktree dir;
         # 主 agent(注册表单例)cwd=None → os.getcwd()(进程 cwd,Phase 1 已 chdir 到 worktree/主仓)。
         self._cwd: str = cwd or os.getcwd()
+        # 本会话 tool-results 目录(ui/app.py _wire_read_file 注入,照搬 read_history.set_jsonl)。
+        # None=未启用持久化/子 agent → 尺寸闸不豁免,行为同今天。
+        self._tool_results_dir: Path | None = None
+
+    def set_tool_results_dir(self, path: Path | None) -> None:
+        """注入本会话 tool-results 目录(<sessiondir>/tool-results/)。
+
+        挂载 + /clear(切新 session)时调,与 read_history.set_jsonl / executor
+        update_output_sink 同模式。read_file 据此豁免 sidecar 的 500KB 拒读
+        (Tier1 落盘的大输出需能分页读回,见尺寸闸 _MAX_READ_BYTES)。
+        """
+        self._tool_results_dir = path
 
     def fork_for_child(self, *, cwd: str | None = None) -> Tool:
-        """worktree 子 agent:cwd=worktree dir → 新实例 _cwd=worktree;否则继承父 _cwd。"""
+        """worktree 子 agent:cwd=worktree dir → 新实例 _cwd=worktree;否则继承父 _cwd。
+
+        _tool_results_dir **不透传**(子默认 None):子 agent sidecar 目录与父不同,
+        且一次性、child_context=None、无 compaction,不产生 sidecar,无需豁免。
+        """
         return type(self)(cwd=cwd or self._cwd)
 
     async def execute(  # type: ignore[override]
@@ -73,6 +89,11 @@ class ReadTool(Tool):
                 "<hint>用 glob 列出该目录下文件,再 read_file 具体文件。</hint>"
             )
         # 尺寸护栏:超限直接拒(避免整文件入内存 OOM),引导分页/Grep 定位。
+        # sidecar 豁免:本会话 tool-results 目录下的文件(Tier1 落盘的大输出)跳过
+        # 拒读,让 demand-paging 能分页读回;进 context 的量仍由 limit/_MAX_INLINE_CHARS 兜底。
+        is_sidecar = self._tool_results_dir is not None and p.resolve().is_relative_to(
+            self._tool_results_dir.resolve()
+        )
         try:
             stat_result = await asyncio.to_thread(p.stat)
         except PermissionError:
@@ -82,7 +103,7 @@ class ReadTool(Tool):
             )
         except OSError as exc:
             return f"<error>读取失败: {exc}</error><hint>检查路径/权限。</hint>"
-        if stat_result.st_size > _MAX_READ_BYTES:
+        if not is_sidecar and stat_result.st_size > _MAX_READ_BYTES:
             return (
                 f"<error>文件过大: {stat_result.st_size} 字节(上限 {_MAX_READ_BYTES})</error>"
                 "<hint>read_file 会整文件读入内存,offset/limit 也绕不过此限。"

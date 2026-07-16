@@ -473,6 +473,14 @@ async def test_clear_rehooks_executor_sink_and_gate_extra_roots(tmp_path):
         # 下面 old_tr not in roots 会失败:这正是该回归测试要守住的底线(旧断言同义反复)。
         assert new_tr in roots
         assert old_tr not in roots
+        # read_file 的 _tool_results_dir 必须重指到新 session 的 tool-results 目录
+        # (同 _wire_read_history 重接 jsonl;否则 /clear 后 read_file 豁免指向旧目录)。
+        from birdcode.tools.read_tool import ReadTool
+
+        rf = app._tool_registry.get("read_file")  # noqa: SLF001
+        assert isinstance(rf, ReadTool)
+        assert rf._tool_results_dir is not None  # noqa: SLF001
+        assert rf._tool_results_dir.resolve() == new_tr  # 重指到新 session
 
 
 @pytest.mark.asyncio

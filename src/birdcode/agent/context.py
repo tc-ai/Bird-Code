@@ -121,10 +121,26 @@ _BACKOFF_BASE = 0.5
 _SNIP_THRESHOLD_RATIO = 0.85
 # 保留最近 N 个 tool_result 不清(仿 Claude Code Tier1,留近期上下文)。
 _SNIP_KEEP = 5
+# 每次 snip 至少要清这么多 token 才值当(改 content 会打掉 prompt cache,清太少不划算)。
+# 未超阈 + 可清总量 < 此值 → 不动,留给将来自然压缩(对齐 CC clear_at_least)。
+_SNIP_CLEAR_AT_LEAST = 2000
 # 占位符:替换旧 tool_result content。read_history / 重跑工具可取回原文。
-_SNIP_PLACEHOLDER = (
-    "[此工具结果已折叠以节省上下文 — 需要完整内容请重新运行工具或使用 read_history]"
-)
+_SNIP_PLACEHOLDER = "[此工具结果已折叠以节省上下文 — 需要完整内容请重新运行工具或使用 read_history]"
+
+
+@dataclass
+class SnipCandidate:
+    """snip 决策用的 tool_result 快照(瞬时:每次 _snip 从 history 现场建,用完丢)。
+
+    size/replaced 从 block.content 派生(单一真相源,无跨轮存储);block 是原地改
+    content 的反向引用。name 供未来按工具类型差异化策略(现仅记录)。
+    """
+
+    tool_use_id: str
+    name: str
+    size: int  # len(block.content):当前占用 context 的真实大小(非原始 size)
+    replaced: bool  # block.content == _SNIP_PLACEHOLDER
+    block: ToolResultBlock
 
 
 class ContextManager:
@@ -339,37 +355,54 @@ class ContextManager:
         """
         return max(int(self._cfg.autocompact_threshold * _SNIP_THRESHOLD_RATIO), 0)
 
-    def _snip_targets(self, history: list[Turn]) -> list[tuple[ToolResultBlock, str]]:
-        """收集待占位的 (block, 原文),保留最近 _SNIP_KEEP 个;排除已占位 → 幂等。
+    def _build_candidates(self, history: list[Turn]) -> list[SnipCandidate]:
+        """遍历 history,为每个 ToolResultBlock 建 SnipCandidate(瞬时派生)。
 
-        按 block 反向计数(并行 tool_result 同一消息可有多个)。返回原文供 _snip 升级
-        _compact 时恢复(摘要需看原文 tool_result,占位符丢细节)。
+        同步收集 tool_use id→name(assistant 消息里),遇 tool_result 配对取 name。
+        返回顺序 = history 顺序(供 _protected_ids 按 recency 补足用)。
         """
-        results: list[ToolResultBlock] = [
-            b
-            for turn in history
-            for m in turn.messages
-            for b in m.content
-            if isinstance(b, ToolResultBlock)
-        ]
-        if len(results) <= _SNIP_KEEP:
-            return []
-        to_replace = results[: len(results) - _SNIP_KEEP]
-        # 排除已占位:二次进入时它们仍是 ToolResultBlock 会被重收集,但 net 无变化。
-        # 返回前过滤 → 调用方据 len 判"有无实际工作"(0 → no-op,不误触发 UI/_stale_anchor)。
-        return [(b, b.content) for b in to_replace if b.content != _SNIP_PLACEHOLDER]
+        id_to_name: dict[str, str] = {}
+        out: list[SnipCandidate] = []
+        for turn in history:
+            for m in turn.messages:
+                for b in m.content:
+                    if isinstance(b, ToolUseBlock):
+                        id_to_name[b.id] = b.name
+                    elif isinstance(b, ToolResultBlock):
+                        out.append(
+                            SnipCandidate(
+                                tool_use_id=b.tool_use_id,
+                                name=id_to_name.get(b.tool_use_id, ""),
+                                size=len(b.content),
+                                replaced=b.content == _SNIP_PLACEHOLDER,
+                                block=b,
+                            )
+                        )
+        return out
 
-    def _snip_old_tool_results(self, history: list[Turn]) -> int:
-        """原地(幂等)把旧 ToolResultBlock.content 替换为占位符,保留最近 _SNIP_KEEP 个。
+    def _protected_ids(self, history: list[Turn]) -> set[str]:
+        """保护集 = 最近完整 turn(history[-1])全部 tool_result + 按 recency 补足 _SNIP_KEEP。
 
-        返回**真正改变**的 block 数(已占位的不计 → 二次调用返回 0,标识 no-op)。
-        安全:ToolResultBlock.content 是普通可变 str(blocks.py);normalize 孤儿剥离只看 id,
-        改 content 不破坏 tool_use↔tool_result 配对;codec 只校验 content 是 str。
+        history[-1] 是最近一个完整 turn(流结束才 append,见 conversation.py);其 tool_result
+        是模型除当前轮外最新鲜上下文,必保。不足 _SNIP_KEEP 时按 recency(倒序)补足。
+        当前在跑的 turn 在 current、不在 history、天然不被 snip。
         """
-        saved = self._snip_targets(history)
-        for b, _ in saved:
-            b.content = _SNIP_PLACEHOLDER
-        return len(saved)
+        protected: set[str] = set()
+        if not history:
+            return protected
+        for m in history[-1].messages:
+            for b in m.content:
+                if isinstance(b, ToolResultBlock):
+                    protected.add(b.tool_use_id)
+        if len(protected) < _SNIP_KEEP:
+            for turn in reversed(history[:-1]):
+                for m in reversed(turn.messages):
+                    for b in reversed(m.content):
+                        if isinstance(b, ToolResultBlock) and b.tool_use_id not in protected:
+                            protected.add(b.tool_use_id)
+                            if len(protected) >= _SNIP_KEEP:
+                                return protected
+        return protected
 
     async def _snip(
         self,
@@ -378,32 +411,55 @@ class ContextManager:
         current: list[Message],
         on_activity: CompactActivity | None = None,
     ) -> CompactionResult | None:
-        """Tier1 snip:清旧 tool_result content(留最近 _SNIP_KEEP 个),零 LLM 成本推迟摘要。
+        """Tier2 snip:按当前内联 size 优先清最大的 tool_result(保护集),零 LLM 成本推迟摘要。
 
-        无可清(saved 空,含二次进入已全占位)→ None(不误触发 UI/_stale_anchor)。
-        pre/post 均 cold 估(同口径,避免 anchored pre + cold post 混口径致 UI post>pre)。
-        snip 后置 _stale_anchor(旧 last_in 反映 snip 前大输入,下轮冷启动估)+ 冷启动重估;
-        若仍 ≥ autocompact_threshold(清得不够)→ **先恢复原文**再转全量 _compact(否则摘要
-        看到占位符,丢旧 tool_result 细节)。否则返回 CompactionResult(trigger="snip")并
-        触发 on_activity(UI 灰色行)。
+        保护集 = 最近一个完整 turn(history[-1])的 tool_result + 按 recency 补足 _SNIP_KEEP。
+        瞬时派生 SnipCandidate(单一真相源 block.content)。pre-check:max_clearable <
+        max(deficit, _SNIP_CLEAR_AT_LEAST) → deficit>0 时 _compact(超阈救不了)/ 否则 None
+        (未超阈不值当)。否则贪心清最大的,停于 est_now < 阈值 且 cleared ≥ 最小清理量。
+        消除旧 restore 路径(pre-check 失败即直转 _compact,未创建占位 → 摘要看原文)。
+        无可清(snippable 空)→ None(幂等:不误触发 UI/_stale_anchor)。
         """
-        saved = self._snip_targets(history)
-        if not saved:
+        candidates = self._build_candidates(history)
+        protected = self._protected_ids(history)
+        snippable = [c for c in candidates if not c.replaced and c.tool_use_id not in protected]
+        if not snippable:
             return None
-        # 改前 cold 估(pre);与改后 post 同口径(maybe_compact 传来的 est 可能 anchored,
-        # 不复用以避免混口径)。
+        snippable.sort(key=lambda c: c.size, reverse=True)  # 大的优先清
+
+        # pre/post 均 cold 估(同口径,避免 anchored pre + cold post 混口径致 UI post>pre)。
         pre_cold = self._est.estimate(history=history, current=current, last_in=None)
-        for b, _ in saved:
-            b.content = _SNIP_PLACEHOLDER
-        self._stale_anchor = True
+        # 每块清掉后净减 token = char_to_token(原 content) − char_to_token(占位符)。
+        # 与 estimator 同口径(都 char_to_token 扫真实 char),只扫 snippable,免二次全量估。
+        ph_tokens = self._est.char_to_token(_SNIP_PLACEHOLDER)
+        clearable_tokens = [
+            max(0, self._est.char_to_token(c.block.content) - ph_tokens) for c in snippable
+        ]
+        max_clearable = sum(clearable_tokens)
+        deficit = pre_cold - self._cfg.autocompact_threshold
+        required = max(deficit, _SNIP_CLEAR_AT_LEAST)
+
+        if max_clearable < required:
+            if deficit > 0:
+                # cold 估实际超阈但 snip 清不够 → 直接全量摘要(不占位、不 restore)。
+                return await self._compact(
+                    history, trigger="auto", pre_tokens=pre_cold, on_activity=on_activity
+                )
+            return None  # 未超阈 + 清不够最小量 → 不动,留给将来自然压缩
+
+        # 贪心:清最大的,直到 est_now < 阈值 且 cleared ≥ 最小清理量(pre-check 保证可达)。
+        cleared = 0
+        for idx, c in enumerate(snippable):
+            if (
+                pre_cold - cleared < self._cfg.autocompact_threshold
+                and cleared >= _SNIP_CLEAR_AT_LEAST
+            ):
+                break
+            c.block.content = _SNIP_PLACEHOLDER
+            cleared += clearable_tokens[idx]
+
+        self._stale_anchor = True  # 旧 last_in 反映 snip 前大输入,下轮冷启动估
         post = self._est.estimate(history=history, current=current, last_in=None)
-        if post >= self._cfg.autocompact_threshold:
-            # 恢复:_compact 要摘要原文 tool_result(占位符会让摘要丢前文细节)。
-            for b, old in saved:
-                b.content = old
-            return await self._compact(
-                history, trigger="auto", pre_tokens=post, on_activity=on_activity
-            )
         result = CompactionResult(
             trigger="snip",
             pre_tokens=pre_cold,
@@ -468,9 +524,7 @@ class ContextManager:
                     if summary_text is not None:
                         break
                     # 提取失败给诊断(可能 reserve 不足致 </summary> 未闭合,或模型未产标签)
-                    log.warning(
-                        "summary 提取失败(无 <summary> 标签;可能 reserve 过小)"
-                    )
+                    log.warning("summary 提取失败(无 <summary> 标签;可能 reserve 过小)")
                 except Exception:  # noqa: BLE001 - 摘要失败不杀主循环,计数熔断
                     log.warning(
                         "summary 调用失败,将重试(达 %d 次熔断)",

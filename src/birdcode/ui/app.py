@@ -411,6 +411,8 @@ class BirdApp(App[None]):
         # read_history 读当前会话 jsonl:注入 store 的 jsonl 路径(只读当前会话,不读其它会话)。
         # /clear 切到新 session 后在 _wire_read_history 里重接(同 update_output_sink 模式)。
         self._wire_read_history()
+        # read_file 豁免 sidecar:注入 store 的 tool-results 目录(同 _wire_read_history 模式)。
+        self._wire_read_file()
         # 上下文管理(Phase 1 安全网):有 store + cfg 才启用,否则 None(旧路径/无 store 测试)。
         # ContextManager 每轮 stream 前评估压缩(超阈→摘要)+ 413 应急硬截断;/compact 手动。
         from birdcode.agent.context import ContextManager
@@ -824,6 +826,26 @@ class BirdApp(App[None]):
         except Exception:
             log.warning("注入 read_history jsonl 路径失败", exc_info=True)
 
+    def _wire_read_file(self) -> None:
+        """把当前 store 的 tool-results 目录注入 read_file(豁免 sidecar 500KB 拒读)。
+
+        on_mount + /clear(切新 session)时调,与 _wire_read_history / update_output_sink /
+        gate extra_root 同模式。registry 不含该工具(自定义/测试)→ 静默跳过。best-effort:
+        失败只 log,不杀主循环(read_file 降级为不豁免,仍可读普通文件)。
+        """
+        from birdcode.tools.read_tool import ReadTool
+
+        reg = self._tool_registry
+        tool = reg.get("read_file") if reg is not None else None
+        if not isinstance(tool, ReadTool):
+            return
+        try:
+            tool.set_tool_results_dir(
+                self._store.tool_results_dir if self._store is not None else None
+            )
+        except Exception:
+            log.warning("注入 read_file tool-results 目录失败", exc_info=True)
+
     def _rebind_agent_tool(
         self, *, ctx: SessionContext | None = None, provider: ParentProvider | None = None
     ) -> None:
@@ -1156,6 +1178,7 @@ class BirdApp(App[None]):
         # 绝不让异常逃出 clear_conversation(否则 controller 状态未切完 + UI 半残)。
         try:
             self._wire_read_history()
+            self._wire_read_file()
             if self._executor is not None:
                 self._executor.update_output_sink(self._store.as_output_sink())
             if self._gate is not None:

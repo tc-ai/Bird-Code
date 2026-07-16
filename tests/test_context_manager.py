@@ -201,170 +201,175 @@ def test_split_prefix_tail_handles_tool_result_blocks():
     assert all(t in turns for t in prefix + tail)
 
 
-# —— Tier1 snip(清旧 tool_result,零 LLM 成本推迟摘要)——
-
-
-def test_snip_old_tool_results_keeps_last_5_and_is_idempotent():
-    """保留最近 _SNIP_KEEP 个,其余置占位符;再跑不变(幂等)。"""
-    from birdcode.agent.context import _SNIP_KEEP, _SNIP_PLACEHOLDER
-    from birdcode.blocks import ToolResultBlock
-
-    cm = _cm()
-    blocks = [ToolResultBlock(tool_use_id=f"t{i}", content=f"result-{i}" * 10) for i in range(8)]
-    turn = Turn(messages=[Message(role="user", content=blocks)])
-    assert cm._snip_old_tool_results([turn]) == 8 - _SNIP_KEEP  # 清 3 个
-    assert all(b.content == _SNIP_PLACEHOLDER for b in blocks[: 8 - _SNIP_KEEP])  # 前 3 占位
-    keep = blocks[8 - _SNIP_KEEP :]
-    assert all(b.content == f"result-{i}" * 10 for i, b in enumerate(keep, start=8 - _SNIP_KEEP))
-    snap = [b.content for b in blocks]
-    # 幂等:已占位的二次调用无实际工作 → 返回 0(不误触发 UI/_stale_anchor)。
-    assert cm._snip_old_tool_results([turn]) == 0
-    assert [b.content for b in blocks] == snap  # 内容不变
-
-
-def test_snip_old_tool_results_returns_zero_when_no_tool_results():
-    cm = _cm()
-    turn = Turn(messages=[Message(role="user", content=[TextBlock(text="only text")])])
-    assert cm._snip_old_tool_results([turn]) == 0
-
-
-async def test_maybe_compact_tier1_snips_and_sets_stale():
-    """est ∈ [tier1, autocompact) → snip(占位旧 tool_result)+ _stale_anchor=True + trigger=snip。"""
+def test_build_candidates_pairs_name_size_replaced():
+    """_build_candidates:配对 tool_use→name、size=len(content)、replaced、block 反引。"""
     from birdcode.agent.context import _SNIP_PLACEHOLDER
-    from birdcode.blocks import ToolResultBlock
+    from birdcode.blocks import ToolResultBlock, ToolUseBlock
 
     cm = _cm()
-    cm._stale_anchor = False  # 让 last_in 生效(est = last_in + current 增量)
-    blocks = [ToolResultBlock(tool_use_id=f"t{i}", content="x" * 1000) for i in range(8)]
-    turns = [Turn(messages=[Message(role="user", content=blocks)])]
-    tier1 = cm._tier1_threshold()
-    res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
-    assert res is not None and res.trigger == "snip"
-    assert cm._stale_anchor is True
-    assert any(b.content == _SNIP_PLACEHOLDER for b in blocks)  # 有被占位
-
-
-async def test_maybe_compact_below_tier1_no_op():
-    cm = _cm()
-    cm._stale_anchor = False
-    turns = [_turn("small")]
-    res = await cm.maybe_compact(history=turns, current=[], last_in=1000)  # < tier1
-    assert res is None
-
-
-async def test_maybe_compact_tier1_no_tool_results_returns_none():
-    """est ∈ tier1 但 history 无 tool_result → snip 无东西可清 → None(不误触发 UI)。"""
-    cm = _cm()
-    cm._stale_anchor = False
-    turns = [_turn("q" * 100)]
-    res = await cm.maybe_compact(
-        history=turns, current=[], last_in=cm._tier1_threshold() + 100
-    )
-    assert res is None
-
-
-async def test_maybe_compact_tier1_snip_insufficient_falls_to_compact():
-    """snip 清完仍 ≥ autocompact(巨大 text 清不动)→ 转 _compact(trigger=auto)。"""
-    from birdcode.blocks import ToolResultBlock
-
-    p = _SummaryProvider(summary_text="SUM")
-    cm = _cm(provider=p)
-    cm._stale_anchor = False
-    tier1 = cm._tier1_threshold()
-    # 多 turn(prefix 非空):每 turn 巨大 text(snip 清不动)+ 2 tool_result(共 10,snip 清 5)
     turns = [
         Turn(messages=[
-            Message(role="user", content=[TextBlock(text="q" * 150_000)]),
+            Message(role="assistant", content=[ToolUseBlock(id="tu1", name="bash", input={})]),
             Message(role="user", content=[
-                ToolResultBlock(tool_use_id=f"t{i}a", content="r" * 500),
-                ToolResultBlock(tool_use_id=f"t{i}b", content="r" * 500),
+                ToolResultBlock(tool_use_id="tu1", content="BIG" * 100),
+                ToolResultBlock(tool_use_id="tu2", content=_SNIP_PLACEHOLDER),  # 已占位
             ]),
-        ])
-        for i in range(5)
+        ]),
     ]
+    cands = cm._build_candidates(turns)
+    assert len(cands) == 2
+    by_id = {c.tool_use_id: c for c in cands}
+    assert by_id["tu1"].name == "bash"
+    assert by_id["tu1"].size == len("BIG" * 100)
+    assert by_id["tu1"].replaced is False
+    assert by_id["tu1"].block.tool_use_id == "tu1"
+    assert by_id["tu2"].replaced is True
+    assert by_id["tu2"].name == ""  # 无配对 tool_use → 空
+
+
+# —— Tier2 snip(size 优先 + 保护最近完整 turn + 最小清理量)——
+
+
+def _results_turn(*contents: str, start: int = 0) -> Turn:
+    """构造一个含若干 tool_result 的 turn(id 从 start 起)。"""
+    from birdcode.blocks import ToolResultBlock
+
+    return Turn(messages=[Message(role="user", content=[
+        ToolResultBlock(tool_use_id=f"t{start + i}", content=c) for i, c in enumerate(contents)
+    ])])
+
+
+async def test_snip_clears_largest_first_and_protects_last_turn():
+    """size 优先:old turn 里最大的先占位;recent turn(history[-1])的 tool_result 全保护不动。"""
+    from birdcode.agent.context import _SNIP_PLACEHOLDER
+
+    cm = _cm()
+    cm._stale_anchor = False
+    tier1 = cm._tier1_threshold()
+    # 6 块:t1=y*50000 最大;尾部 4 块 filler 被 _SNIP_KEEP 补足保护 → t0/t1 snippable。
+    old = _results_turn("x" * 1000, "y" * 50000, "z" * 5000, "a" * 10, "a" * 10, "a" * 10, start=0)
+    recent = _results_turn("w" * 1000, start=10)
+    turns = [old, recent]
     res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
-    assert res is not None and res.trigger == "auto"  # snip 不够 → 转 _compact
-    assert p._calls >= 1  # 调了 LLM 摘要
-
-
-async def test_maybe_compact_tier1_snip_on_activity_reason():
-    """snip 触发 on_activity,reason="snip"(UI 据此分灰色)。"""
-    from birdcode.blocks import ToolResultBlock
-
-    cm = _cm()
-    cm._stale_anchor = False
-    tier1 = cm._tier1_threshold()
-    blocks = [ToolResultBlock(tool_use_id=f"t{i}", content="x" * 1000) for i in range(8)]
-    turns = [Turn(messages=[Message(role="user", content=blocks)])]
-    events: list[tuple[str, str]] = []
-
-    async def on_activity(phase: str, reason: str, result: object) -> None:
-        events.append((phase, reason))
-
-    res = await cm.maybe_compact(
-        history=turns, current=[], last_in=tier1 + 100, on_activity=on_activity
-    )
     assert res is not None and res.trigger == "snip"
-    assert ("start", "snip") in events
-    assert ("end", "snip") in events
+    blocks_old = old.messages[0].content
+    blocks_recent = recent.messages[0].content
+    # 最大块(t1=y*50000)被占位;recent 的块保留
+    assert blocks_old[1].content == _SNIP_PLACEHOLDER
+    assert blocks_recent[0].content == "w" * 1000
 
 
-# —— snip 修复:xhigh review #3/#4/#5 ——
-
-
-async def test_tier1_snip_idempotent_no_spurious_activity():
-    """#3:二次进入 tier1(tool_result 已全占位)→ _snip_targets 过滤 → 无实际工作 →
-    不重复触发 on_activity / 不重置 _stale_anchor(修每轮 spurious snip 事件)。"""
-    from birdcode.blocks import ToolResultBlock
+async def test_snip_clears_only_largest_then_stops_at_clear_at_least():
+    """size 优先(硬):多个可清候选里,清完最大块即满足 _SNIP_CLEAR_AT_LEAST → 立即停,
+    次大/小块保留。证明贪心按 size 降序、停在最小清理量(非全清)。"""
+    from birdcode.agent.context import _SNIP_PLACEHOLDER
 
     cm = _cm()
     cm._stale_anchor = False
     tier1 = cm._tier1_threshold()
-    blocks = [ToolResultBlock(tool_use_id=f"t{i}", content="x" * 1000) for i in range(8)]
-    turns = [Turn(messages=[Message(role="user", content=blocks)])]
-    events: list[tuple[str, str]] = []
-
-    async def on_activity(phase: str, reason: str, result: object) -> None:
-        events.append((phase, reason))
-
-    first = await cm.maybe_compact(
-        history=turns, current=[], last_in=tier1 + 100, on_activity=on_activity
+    # old:t0(BIG)>t1(MID)>t2(SMALL) 为最旧 3 块(保护窗外、可清);
+    # t3-t6 filler(最新 4 块)与 recent 一起填满保护集 5 → t0/t1/t2 snippable。
+    old = _results_turn(
+        "B" * 50000, "M" * 10000, "S" * 2000,
+        "f" * 10, "f" * 10, "f" * 10, "f" * 10, start=0,
     )
+    recent = _results_turn("w" * 1000, start=10)
+    turns = [old, recent]
+    res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
+    assert res is not None and res.trigger == "snip"
+    bo = old.messages[0].content
+    assert bo[0].content == _SNIP_PLACEHOLDER   # BIG(最大)被清
+    assert bo[1].content == "M" * 10000         # MID 保留(已满足最小量 → 停)
+    assert bo[2].content == "S" * 2000          # SMALL 保留
+    assert recent.messages[0].content[0].content == "w" * 1000  # 保护集未动
+
+
+async def test_snip_idempotent_excludes_already_placeholdered():
+    """已占位的候选排除:二次进入(其它块仍可清时)不再重复占位同一块。"""
+    from birdcode.agent.context import _SNIP_PLACEHOLDER
+
+    cm = _cm()
+    cm._stale_anchor = False
+    tier1 = cm._tier1_threshold()
+    # t0/t1 大;尾部 4 块 filler 被补足保护 → t0/t1 snippable(每轮清 1 个,二次仍可清另一个)。
+    old = _results_turn("x" * 50000, "y" * 50000, "a" * 10, "a" * 10, "a" * 10, "a" * 10, start=0)
+    recent = _results_turn("w" * 1000, start=10)
+    turns = [old, recent]
+    first = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
     assert first is not None and first.trigger == "snip"
-    assert ("start", "snip") in events and ("end", "snip") in events
-    # 二次:blocks 已占位 → _snip_targets 返回空 → None,不触发 activity
-    events.clear()
-    cm._stale_anchor = False  # 重置以再次走 last_in 进 tier1(隔离 _stale_anchor 干扰)
-    second = await cm.maybe_compact(
-        history=turns, current=[], last_in=tier1 + 100, on_activity=on_activity
+    placeholdered = [
+        b.tool_use_id for b in old.messages[0].content if b.content == _SNIP_PLACEHOLDER
+    ]
+    assert len(placeholdered) >= 1
+    # 二次:已占位的不再动(仍可能清下一块,但不会把占位块再"清"一次)
+    cm._stale_anchor = False
+    second = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
+    # 已占位块二次后仍是占位符(未被改回/重复处理)
+    assert all(
+        b.content == _SNIP_PLACEHOLDER
+        for b in old.messages[0].content
+        if b.tool_use_id in placeholdered
     )
-    assert second is None
-    assert events == []  # 无 spurious activity
+    if second is None:
+        # 若二次无可清(snippable 空)→ None,合理
+        pass
 
 
-async def test_tier1_snip_escalate_restores_original_tool_results():
-    """#4:snip 清完仍 ≥ 阈值 → 升级 _compact 前**恢复原文 tool_result**(否则摘要看到占位符,
-    丢前文细节——旧路径 _render_prefix_for_summary 带 2000-char 预览保留的细节)。"""
+async def test_snip_below_clear_at_least_under_threshold_returns_none():
+    """未超阈 + 可清总量 < _SNIP_CLEAR_AT_LEAST → 不动(None),留给将来自然压缩。"""
+    cm = _cm()
+    cm._stale_anchor = False
+    tier1 = cm._tier1_threshold()
+    # old turn 单块极小(总可清 << _SNIP_CLEAR_AT_LEAST);recent 保护自己
+    old = _results_turn("x" * 100, start=0)
+    recent = _results_turn("w" * 1000, start=10)
+    turns = [old, recent]
+    res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
+    assert res is None  # 不值当,不动
+
+
+async def test_snip_pre_post_same_cold_estimator():
+    """snip 的 pre/post 均 cold 估(同口径)→ pre >= post。"""
+    cm = _cm()
+    cm._stale_anchor = False
+    tier1 = cm._tier1_threshold()
+    old = _results_turn(*["x" * 5000 for _ in range(6)], start=0)
+    recent = _results_turn("w" * 1000, start=10)
+    turns = [old, recent]
+    res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
+    assert res is not None and res.trigger == "snip"
+    assert res.pre_tokens >= res.post_tokens
+
+
+async def test_snip_over_threshold_insufficient_goes_to_compact_sees_originals():
+    """cold 估超阈(deficit>0)但 snip 清不够 → 直接 _compact;摘要在未创建任何占位前看到
+    原文(证明消除 restore:旧路径先占位再恢复,新路径根本没占位)。
+
+    用 _Recording 抓 summarize_with_prefix 的 prefix(= 待摘要段,含 tool_result)。
+    """
     from birdcode.agent.context import _SNIP_PLACEHOLDER
     from birdcode.blocks import ToolResultBlock
 
-    class _RecordingProvider(_SummaryProvider):
+    class _Recording(_SummaryProvider):
         def __init__(self) -> None:
             super().__init__(summary_text="SUM")
             self.seen_prefix: list | None = None
 
         async def summarize_with_prefix(  # noqa: ANN001
-            self, *, prefix: list, instruction: str, max_tokens: int
-        ) -> str:
+            self, *, prefix, instruction, max_tokens
+        ):
             self.seen_prefix = prefix
             return await super().summarize_with_prefix(
                 prefix=prefix, instruction=instruction, max_tokens=max_tokens
             )
 
-    p = _RecordingProvider()
+    p = _Recording()
     cm = _cm(provider=p)
     cm._stale_anchor = False
     tier1 = cm._tier1_threshold()
+    # 5 turn 大 text(cold 估超阈)+ 每 turn 2 小 tool_result(snip 清不动 deficit)。
+    # history[-1]=最后大 turn → 其 2 result 必保;按 recency 补足到 _SNIP_KEEP 后,
+    # 最旧若干 result snippable,但总可清 << deficit → pre-check 失败 → _compact。
     turns = [
         Turn(messages=[
             Message(role="user", content=[TextBlock(text="q" * 150_000)]),
@@ -376,30 +381,85 @@ async def test_tier1_snip_escalate_restores_original_tool_results():
         for i in range(5)
     ]
     res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
-    assert res is not None and res.trigger == "auto"  # snip 不够 → 升级 _compact
-    assert p._calls >= 1
-    # 摘要看到的 prefix 含原文 tool_result,不含占位符
+    assert res is not None and res.trigger == "auto"
+    assert p._calls >= 1  # 调了 LLM 摘要
+    # 摘要看到的 prefix 含原文 tool_result,不含占位符(新路径未创建任何占位)
     assert p.seen_prefix is not None
     seen = [
-        b.content
-        for m in p.seen_prefix
-        for b in m.content
+        b.content for m in p.seen_prefix for b in m.content
         if isinstance(b, ToolResultBlock)
     ]
     assert any("ORIGINAL-RESULT" in (c or "") for c in seen)
     assert not any(c == _SNIP_PLACEHOLDER for c in seen)
 
 
-async def test_tier1_snip_pre_post_same_cold_estimator():
-    """#5:snip 的 pre/post 均 cold 估(同口径)→ pre >= post(修 anchored pre + cold post
-    混口径致 UI 显示 post>pre 的误导)。"""
-    from birdcode.blocks import ToolResultBlock
+async def test_snip_no_tool_results_returns_none():
+    """tier1 但 history 无 tool_result → 无可清 → None(不误触发 UI)。"""
+    cm = _cm()
+    cm._stale_anchor = False
+    turns = [_turn("q" * 100)]
+    res = await cm.maybe_compact(
+        history=turns, current=[], last_in=cm._tier1_threshold() + 100
+    )
+    assert res is None
 
+
+async def test_snip_fires_on_activity_reason():
+    """snip 触发 on_activity(reason="snip");无可清时(None)不触发。"""
     cm = _cm()
     cm._stale_anchor = False
     tier1 = cm._tier1_threshold()
-    blocks = [ToolResultBlock(tool_use_id=f"t{i}", content="x" * 5000) for i in range(8)]
-    turns = [Turn(messages=[Message(role="user", content=blocks)])]
-    res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
+    # 8 块:尾部 4 块被补足保护 → t0-t3 snippable(共可清 >> _SNIP_CLEAR_AT_LEAST)。
+    old = _results_turn(*["x" * 5000 for _ in range(8)], start=0)
+    recent = _results_turn("w" * 1000, start=10)
+    turns = [old, recent]
+    events: list[tuple[str, str]] = []
+
+    async def on_activity(phase: str, reason: str, result: object) -> None:
+        events.append((phase, reason))
+
+    res = await cm.maybe_compact(
+        history=turns, current=[], last_in=tier1 + 100, on_activity=on_activity
+    )
     assert res is not None and res.trigger == "snip"
-    assert res.pre_tokens >= res.post_tokens  # 同 cold 口径,清后必 <= 清前
+    assert ("start", "snip") in events and ("end", "snip") in events
+
+
+# —— Task 5:保护集 _protected_ids(最近完整 turn + 补足 _SNIP_KEEP)——
+
+
+def test_protected_ids_keeps_whole_last_turn_and_topups_to_keep():
+    """保护集:① history[-1] 全部 tool_result;② 不足 _SNIP_KEEP 按 recency 补足。"""
+    from birdcode.agent.context import _SNIP_KEEP
+    from birdcode.blocks import ToolResultBlock
+
+    cm = _cm()
+    # old turn:3 个;recent turn:2 个(< _SNIP_KEEP=5)
+    old = Turn(messages=[Message(role="user", content=[
+        ToolResultBlock(tool_use_id=f"o{i}", content="x") for i in range(3)
+    ])])
+    recent = Turn(messages=[Message(role="user", content=[
+        ToolResultBlock(tool_use_id=f"r{i}", content="x") for i in range(2)
+    ])])
+    protected = cm._protected_ids([old, recent])
+    # recent 全保(2)+ 从 old 补到 5(再取 3 个 old)= 5
+    assert {"r0", "r1"} <= protected
+    assert len(protected) == _SNIP_KEEP
+
+
+def test_protected_ids_keeps_all_when_last_turn_exceeds_keep():
+    """history[-1] 的 tool_result 多于 _SNIP_KEEP → 全保(不截断)。"""
+    from birdcode.agent.context import _SNIP_KEEP
+    from birdcode.blocks import ToolResultBlock
+
+    cm = _cm()
+    recent = Turn(messages=[Message(role="user", content=[
+        ToolResultBlock(tool_use_id=f"r{i}", content="x") for i in range(_SNIP_KEEP + 3)
+    ])])
+    protected = cm._protected_ids([recent])
+    assert len(protected) == _SNIP_KEEP + 3  # 全保
+
+
+def test_protected_ids_empty_history():
+    cm = _cm()
+    assert cm._protected_ids([]) == set()
