@@ -32,7 +32,10 @@ if TYPE_CHECKING:
 
 log = get_logger("birdcode.cli")
 
-app = typer.Typer(add_completion=False, help="BirdCode — terminal AI coding agent.")
+app = typer.Typer(add_completion=False, invoke_without_command=True,
+                  help="BirdCode — terminal AI coding agent.")
+session_app = typer.Typer(help="会话工具(查看 / 可视化历史会话)。")
+app.add_typer(session_app, name="session")
 
 
 class ProfileError(Exception):
@@ -404,8 +407,9 @@ def run_tui(
         log.debug("transcript dump failed", exc_info=True)
 
 
-@app.command()
-def main(
+@app.callback()
+def _root(
+    ctx: typer.Context,
     profile_name: str | None = typer.Option(
         None, "--profile", "-p", help="profile 名（留空=用配置 default；mock=离线回退）。"
     ),
@@ -422,14 +426,49 @@ def main(
         None, "--worktree", "-w", help="在隔离 worktree 里起会话(并行开发)。"
     ),
 ) -> None:
-    """Start the BirdCode interactive terminal."""
+    """BirdCode — terminal AI coding agent。无子命令时启动交互式 TUI。"""
+    if ctx.invoked_subcommand is None:
+        try:
+            run_tui(
+                profile_name, theme, delay, config,
+                continue_last, resume, worktree_name=worktree,
+            )
+        except (KeyboardInterrupt, EOFError):
+            pass
+        except Exception as exc:  # never crash to a traceback
+            log.exception("fatal error in TUI")
+            typer.secho(
+                f"BirdCode 遇到错误，详见 ~/.birdcode/debug.log: {exc}",
+                fg=typer.colors.RED,
+            )
+        raise typer.Exit()
+
+
+_VIZ_OUTPUT = typer.Option(None, "--output", "-o", help="输出 HTML 路径(默认 <stem>.html)。")
+_VIZ_OPEN = typer.Option(False, "--open", help="生成后用默认浏览器打开。")
+
+
+@session_app.command("viz")
+def viz(
+    session: str = typer.Argument(..., help="会话 jsonl 路径 或 sessionId。"),
+    output: Path | None = _VIZ_OUTPUT,
+    open_browser: bool = _VIZ_OPEN,
+) -> None:
+    """把会话 jsonl 渲染成交互式 HTML 执行流程树(卡片 + 时间线 + 子 agent 分支)。"""
+    from birdcode.session.viz import render_session_html, resolve_session_jsonl
+
     try:
-        run_tui(profile_name, theme, delay, config, continue_last, resume, worktree_name=worktree)
-    except (KeyboardInterrupt, EOFError):
-        pass
-    except Exception as exc:  # never crash to a traceback
-        log.exception("fatal error in TUI")
-        typer.secho(f"BirdCode 遇到错误，详见 ~/.birdcode/debug.log: {exc}", fg=typer.colors.RED)
+        jsonl = resolve_session_jsonl(session)
+    except FileNotFoundError as e:
+        typer.secho(str(e), fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
+    out = output or jsonl.with_suffix(".html")
+    out.write_text(render_session_html(jsonl), encoding="utf-8")
+    typer.secho(f"[OK] {out}", fg=typer.colors.GREEN)
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(out.as_uri())
 
 
 def run() -> None:
