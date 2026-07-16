@@ -233,6 +233,17 @@ def ts_short(ts: str) -> str:
     return ts[11:19] if len(ts) >= 19 else ts
 
 
+def _format_body(text: str) -> str:
+    """结构化展示:形如 JSON 则美化缩进,否则原样;返回已 HTML 转义的字符串。"""
+    s = text.strip()
+    if s and s[0] in "[{":
+        try:
+            return esc(json.dumps(json.loads(s), ensure_ascii=False, indent=2))
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return esc(text)
+
+
 def render_block_full(b: Block) -> str:
     if b.kind == "text":
         return f"<p class='blk'><b>text:</b> {esc(b.text)}</p>"
@@ -245,11 +256,12 @@ def render_block_full(b: Block) -> str:
             f" <code>id={esc(b.tool_use_id)}</code></p>"
         )
     if b.kind == "tool_result":
-        tag = " ERROR" if b.is_error else ""
-        return (
-            f"<p class='blk'><b>tool_result{tag}:</b> {esc(b.content)}"
+        tag = "ERROR" if b.is_error else "ok"
+        head = (
+            f"<p class='blk'><b>tool_result · {tag}</b>"
             f" <code>↤ {esc(b.tool_use_id)}</code></p>"
         )
+        return head + f"<pre class='blk-result'>{_format_body(b.content)}</pre>"
     return ""
 
 
@@ -287,9 +299,12 @@ def node_card(node: Node, prefix: str = "m") -> str:
           <span class="ts">{esc(ts_short(node.timestamp))}</span>
         </header>
         <div class="preview">{esc(body)}</div>
-        <details class="detail"><summary>展开详情 / 原始 JSON</summary>
+        <details class="detail"><summary>展开详情</summary>
           <div class="full">{full}</div>
-          <pre class="raw">{esc(raw_pretty)}</pre>
+          <details class="rawwrap">
+            <summary>原始 JSON(整行 · {len(raw_pretty)} 字符)</summary>
+            <pre class="raw">{esc(raw_pretty)}</pre>
+          </details>
         </details>
       </div>
     </article>"""
@@ -390,7 +405,14 @@ main{max-width:1080px;margin:0 auto;padding:26px 34px 80px;}
 .detail[open] summary{color:var(--text-dim);margin-bottom:4px;}
 .full{margin-top:6px;font-size:12.5px;}
 .full .blk{margin:3px 0;padding:6px 9px;background:var(--bg-soft);border-radius:6px;
-  border:1px solid var(--border);word-break:break-word;}
+  border:1px solid var(--border);white-space:pre-wrap;word-break:break-word;}
+.blk-result{margin:4px 0 6px;padding:8px 10px;background:var(--bg-soft);
+  border:1px solid var(--border);border-radius:6px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;
+  white-space:pre-wrap;word-break:break-word;max-height:400px;overflow:auto;color:var(--text);}
+.rawwrap{margin-top:6px;}
+.rawwrap summary{cursor:pointer;font-size:11px;color:var(--text-faint);}
+.rawwrap[open] summary{color:var(--text-dim);margin-bottom:4px;}
 .full code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   font-size:11px;color:var(--text-faint);}
 .raw{margin-top:8px;background:#0f172a;color:#e2e8f0;padding:10px;border-radius:8px;font-size:11.5px;
