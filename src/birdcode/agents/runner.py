@@ -42,9 +42,6 @@ log = get_logger("birdcode.agents.runner")
 
 MAX_SPAWN_DEPTH = 1  # 递归硬禁止(子工具表本就不含 Agent;此为防御性 belt-and-suspenders)
 
-# agent teams:mailbox 关闭信号。teammate run() 循环 await mailbox.get() 据此干净终止。
-_TEAMMATE_SHUTDOWN = object()
-
 
 class ParentProvider(Protocol):
     """resolve_profile / AgentTool 等跨模块共用的父 provider 视图:一个 .profile 属性。
@@ -61,7 +58,7 @@ class ParentProvider(Protocol):
 
 def build_child_registry(
     parent: ToolRegistry | None, disallowed: tuple[str, ...], *, is_async: bool = False,
-    cwd: str | None = None, include_team_tools: bool = True,
+    cwd: str | None = None,
 ) -> ToolRegistry:
     """子工具表 = 父 registry 减三类:agent tool、disallowed、会话级有状态工具。
 
@@ -90,11 +87,6 @@ def build_child_registry(
         if getattr(tool, "is_agent_tool", False) or name in disallowed_set:
             continue
         if tool.session_scoped:
-            continue
-        # team 工具(team_scoped)仅 teammate(mailbox 非空)继承;一次性 subagent 排除
-        # (后者非 team 成员,误调会误归属 sender="lead")。include_team_tools 由 runner
-        # 据 self.mailbox 是否非空传入。
-        if not include_team_tools and getattr(tool, "team_scoped", False):
             continue
         # 异步子 agent:ask_user 无法交互 → 换 stub(execute 返回拒文案),不 fork 原 tool。
         if is_async and getattr(tool, "is_ask_user", False):
@@ -237,7 +229,6 @@ class SubagentRunner:
         project_root: Path,
         root: Path | None = None,
         progress_cb: Callable[..., Awaitable[None]] | None = None,
-        mailbox: asyncio.Queue | None = None,
         agent_id: str | None = None,
         resume_from: Path | None = None,
     ) -> None:
@@ -259,7 +250,6 @@ class SubagentRunner:
         self.project_root = project_root
         self.root = root
         self.progress_cb = progress_cb
-        self.mailbox = mailbox  # agent teams:非空→长驻 teammate 循环;None→一次性(原行为)
         # 续跑(T4):注入旧 agent_id 复用(指向既有侧链/meta);None→新生成 sub-{uuid12}。
         self.agent_id = agent_id if agent_id is not None else f"sub-{_uuid.uuid4().hex[:12]}"
         self.resume_from = resume_from  # 非空 → resume 模式:加载侧链为 history、跳过播种
@@ -271,9 +261,6 @@ class SubagentRunner:
 
     async def run(self) -> SubagentReport:
         started = time.monotonic()
-        # #10:teammate duration 分段计时——active_ms 累加活跃段(不含 park);一次性仍用 started。
-        active_ms = 0
-        active_start = started
         meta_path = paths.subagent_meta_path(
             self.root or paths.default_root(),
             self.ctx.session_id, self.project_root, self.agent_id,
@@ -398,7 +385,6 @@ class SubagentRunner:
             child_registry = build_child_registry(
                 self.parent_registry, self.defn.disallowed_tools, is_async=self.is_async,
                 cwd=str(worktree_dir) if worktree_dir else None,
-                include_team_tools=self.mailbox is not None,  # teammate 继承 team 工具;一次性不继承
             )
             child_gate = (
                 build_child_gate(
@@ -422,13 +408,8 @@ class SubagentRunner:
                 system_override=_system_override(self.defn, self.isolation),
                 mcp_instructions=mcp_instructions,
             )
-            # S3/#1:teammate(mailbox 非空)接 ContextManager(store=None 纯内存)——长驻 history 跨轮
-            # 累积会 O(n²) 爆 + ContextOverflow;maybe_compact 压缩 + react 截断兜底。一次性仍 None。
-            child_context: ContextManager | None = (
-                ContextManager(child_provider, None, self.cfg)
-                if self.mailbox is not None
-                else None
-            )
+            # 一次性子 agent:不接 ContextManager(history 不跨轮累积,无需 maybe_compact)。
+            child_context: ContextManager | None = None
             history: list[Turn]
             if self.resume_from is not None:
                 # resume 模式(T4):侧链当 history(只重放旧轮次,含已执行工具——不重执,
@@ -454,37 +435,13 @@ class SubagentRunner:
                 # (user + assistant ≥ 2 行)。
                 await store.append(turn.messages[0])
                 history = []
-            # agent teams:mailbox 非空 → 长驻 teammate 循环(run→park→wake→run);否则
-            # 一次性 subagent(一轮即止,原行为)。run_agent_loop 返回 = 一轮自然结束(无
-            # tool_use):一次性据此报完成;teammate 据此 park 等 mailbox。history 跨轮累积
-            # (teammate 长驻本质);run_agent_loop 以 history 为只读先验上下文(context=None)。
-            while True:
-                await run_agent_loop(
-                    provider=child_provider, turn=turn, history=history,
-                    executor=child_executor, emit=_emit, on_message=_on_message,
-                    context=child_context,
-                )
-                if self.mailbox is None:
-                    break  # 一次性:一轮即止(原行为)
-                if error_msg is not None:
-                    break  # teammate:护栏/Provider Error→终止(post-loop 报 error)
-                history.append(turn)
-                active_ms += _elapsed_ms(active_start)  # #10:累加本轮活跃(到 park)
-                _update_meta(meta_path, status="idle")
-                if tick_task is not None:  # park:停 tick(免 idle 时仍报 phase=running + elapsed 增)
-                    tick_task.cancel()
-                    tick_task = None
-                item = await self.mailbox.get()  # park:阻塞到 mailbox 有消息
-                if item is _TEAMMATE_SHUTDOWN:
-                    break  # 关闭信号→干净终止
-                active_start = time.monotonic()  # #10:wake:新活跃段起点(park 时间不计入)
-                if self.progress_cb is not None:  # wake:重启 tick
-                    tick_task = asyncio.create_task(_progress_tick())
-                _update_meta(meta_path, status="running")
-                # item 是 MailboxMessage:加"[来自 sender]:"前缀,让收方知道谁发的
-                text = f"[来自 {item.sender}]: {item.content}"
-                turn = Turn(messages=[Message(role="user", content=[TextBlock(text=text)])])
-                await store.append(turn.messages[0])  # 新轮种子 user 消息落盘
+            # 一次性子 agent:跑一轮 run_agent_loop 到自然结束(无 tool_use)即止。
+            # run_agent_loop 以 history 为只读先验上下文(context=child_context)。
+            await run_agent_loop(
+                provider=child_provider, turn=turn, history=history,
+                executor=child_executor, emit=_emit, on_message=_on_message,
+                context=child_context,
+            )
             if error_msg is not None:
                 # 护栏 / provider Error 终止:run_agent_loop 已正常 return,但子 agent 并未真正
                 # 完成。报 error + 把护栏消息回传主 agent(否则空正文被当成功)。
@@ -500,8 +457,7 @@ class SubagentRunner:
             else:
                 report_text = _final_assistant_text(turn)
                 is_completed = is_terminal_report_text(report_text)
-                # #10:teammate duration=active_ms(不含 idle park);一次性=墙钟(started)
-                duration = active_ms if self.mailbox is not None else _elapsed_ms(started)
+                duration = _elapsed_ms(started)
                 report = SubagentReport(
                     is_completed=is_completed, text=report_text, status="completed",
                     duration_ms=duration, tokens=state["tokens"],

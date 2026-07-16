@@ -124,7 +124,7 @@ class SubagentStore:
 
 
 def read_subagent_transcript(path: Path) -> list[Turn]:
-    """读 sidechain jsonl → list[Turn](完整对话,给 /agents UI 看 teammate transcript)。
+    """读 sidechain jsonl → list[Turn](完整对话,供子 agent transcript 查看)。
 
     镜像 app._read_sidechain_final_text 的读循环,但返完整 codec.decode_lines(非只末条文本)。
     坏行/缺文件 → 空或跳过(韧性,不抛)。decode_lines 不过滤 isSidechain,直接适用 sidechain 行。

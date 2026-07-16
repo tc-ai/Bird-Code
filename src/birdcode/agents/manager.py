@@ -113,7 +113,7 @@ class SubagentManager:
     async def join_all(self, *, timeout: float = 5.0) -> None:
         """await 所有异步子 agent _supervise 终止(其 run() finally 内 worktree cleanup 跑完)。
 
-        on_unmount 退出用:cancel_all 后调,与 TeamManager.join_all 对称。不 await 则 app 关
+        on_unmount 退出用:cancel_all 后调。不 await 则 app 关
         loop 砍断 _supervise → async worktree 子 agent 同样留 git-locked 残留(agent_id 随机,
         快速恢复救不了)。带总超时:cleanup 卡住不阻塞退出,超时退化为 best-effort。
         """

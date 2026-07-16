@@ -62,19 +62,15 @@ class Tool(ABC):
     kind: Literal["read", "write"] = "write"
     parallel_safe: bool = False
     hidden: bool = False  # True 时不暴露给 LLM(to_*_tools 跳过),仅内部/测试可执行
-    # True → executor 跳过权限 gate。仅用于纯内存、无 FS/命令副作用的协调工具
-    # (agent teams 的 SendMessage/Task*:mailbox queue / board dict 操作)。这些工具
-    # 不碰文件/命令,L1(黑名单)/L2(沙箱)本就不适用;fork_async 的 L5 对非 bash write
-    # 恒拒会挡死 teammate 间的 team 工具调用,故放行。
+    # True → executor 跳过权限 gate。预留给纯内存、无 FS/命令副作用的协调工具
+    # (不碰文件/命令,L1/L2 本就不适用;异步子 agent 的 L5 对非 bash write 恒拒会挡死
+    # 这类工具,故放行)。当前无内置工具启用。
     gate_exempt: bool = False
     # 持有【父会话级】状态的工具(如 read_history 的主线 jsonl、tool_search 的父 registry)。
     # True → build_child_registry 排除(不原样共享给子 agent,否则子 agent 读/写父 agent 状态)。
     # 与 fork_for_child 的区别:session_scoped 工具根本不该进子工具表;fork_for_child 处理
     # 「可继承但需隔离每实例状态」的工具(如 BashTool._cwd)。
     session_scoped: bool = False
-    # 持有 team 共享状态(TeamManager);True → build_child_registry 仅 teammate(mailbox 非空)
-    # 继承,一次性 subagent 排除(后者非 team 成员,误调 team 工具会误归属 sender="lead")。
-    team_scoped: bool = False
     # 工具输出持久化阈值(字符数)。超此 → executor 落盘完整结果 + 给 LLM 占位(路径+预览);
     # math.inf → 永不落盘(read_file:靠自身 limit/500KB 护栏界定输出,落盘会致
     #   「读落盘文件→又超阈→循环」)。仿 CC maxResultSizeChars。默认 100K(MCP/未声明工具)。

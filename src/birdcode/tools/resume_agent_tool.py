@@ -41,7 +41,7 @@ class ResumeAgentTool(Tool):
     parameters = ResumeAgentInput
     kind = "write"            # 续跑会执行工具,有副作用
     parallel_safe = False
-    # 派生子 agent(复用 id)→ build_child_registry 排除,堵递归(同类 _AgentTool/SpawnTeammate)
+    # 派生子 agent(复用 id)→ build_child_registry 排除,堵递归(同类 _AgentTool)
     is_agent_tool = True
 
     def __init__(self, *, deps: ResumeDeps) -> None:

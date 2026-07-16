@@ -62,7 +62,6 @@ if TYPE_CHECKING:
     from birdcode.agents.manager import SubagentManager
     from birdcode.agents.report import SubagentProgress
     from birdcode.agents.runner import ParentProvider
-    from birdcode.agents.teammate import TeamManager
     from birdcode.config.schema import AppConfig
     from birdcode.conversation import Turn as ConversationTurn
     from birdcode.mcp.client import McpManager
@@ -294,8 +293,6 @@ class BirdApp(App[None]):
         # 异步子 agent 生命周期管理器(Phase2):on_mount 构造并注入 AgentTool;
         # None=未启用(无 cfg/store 路径)。Esc→cancel_all;/clear→rebind 到新会话。
         self._subagent_mgr: SubagentManager | None = None
-        # agent teams(P5):on_mount 构造 + 注册 team 工具;Esc→cancel_all;/clear→reset。
-        self._team_mgr: TeamManager | None = None
         self._follow_timer: Timer | None = None  # 生成期间的「钉底」定时器
         self._bg_tasks: set[asyncio.Task[None]] = set()  # 持有后台轮次任务引用 + 回收异常
         # T12 dedup:reminder Turn 已注入 flag。on_mount 或"继续"路由调 _inject_resumable_reminder,
@@ -323,55 +320,6 @@ class BirdApp(App[None]):
     @property
     def cfg(self) -> AppConfig | None:
         return self._cfg
-
-    @property
-    def team_mgr(self) -> TeamManager | None:
-        return self._team_mgr
-
-    def list_teammates(self) -> list[dict[str, str]]:
-        """列当前 team 的 teammate(name/agent_id/status/description),/agents 视图用。
-
-        status 优先读 SubagentMeta(idle/running/completed/...);
-        meta 缺则按 task.done() 推 done/unknown。
-        """
-        if self._team_mgr is None or self._store is None or self._cfg is None:
-            return []
-        from birdcode.session import paths
-        from birdcode.session.subagent_meta import read_subagent_meta
-        from birdcode.utils.worktree import worktree_store_name
-
-        wt = worktree_store_name(self._store.ctx.cwd)
-        project_root = self._cfg.project_root or Path(".")
-        info: list[dict[str, str]] = []
-        for name, h in self._team_mgr.teammates():
-            mp = paths.subagent_meta_path(
-                self._store.root, self._store.ctx.session_id, project_root, h.agent_id,
-                worktree_name=wt,
-            )
-            m = read_subagent_meta(mp)
-            info.append({
-                "name": name,
-                "agent_id": h.agent_id,
-                "status": m.status if m else ("done" if h.done() else "unknown"),
-                "description": m.description if m else "",
-            })
-        return info
-
-    def read_teammate_transcript(self, agent_id: str) -> list[ConversationTurn]:
-        """读某 teammate 的 sidechain transcript → list[Turn](/agents 看对话用)。"""
-        if self._store is None or self._cfg is None:
-            return []
-        from birdcode.session import paths
-        from birdcode.session.subagent_store import read_subagent_transcript
-        from birdcode.utils.worktree import worktree_store_name
-
-        wt = worktree_store_name(self._store.ctx.cwd)
-        project_root = self._cfg.project_root or Path(".")
-        p = paths.subagent_jsonl_path(
-            self._store.root, self._store.ctx.session_id, project_root, agent_id,
-            worktree_name=wt,
-        )
-        return read_subagent_transcript(p)
 
     def get_token_usage(self) -> TokenUsage | None:
         return self.usage
@@ -533,31 +481,6 @@ class BirdApp(App[None]):
 
             # 异步子 agent manager(Phase2):fork-skill 与 agent 共用。
             self._subagent_mgr = SubagentManager(store=self._store, controller=self.controller)
-            # agent teams(P5):构造 team_mgr + 注册 team 工具到 lead registry(lead + teammate
-            # 经 build_child_registry fork→self 共用;gate_exempt 免 async gate 拦)。
-            from birdcode.agents.teammate import TeamManager as _TeamManager
-            from birdcode.tools.send_message import SendMessageTool
-            from birdcode.tools.task_tools import (
-                TaskClaimTool,
-                TaskCreateTool,
-                TaskListTool,
-                TaskUpdateTool,
-            )
-
-            self._team_mgr = _TeamManager()
-            # 注册 lead 为 recipient:teammate→lead 通道(SendMessage(to="lead") 路由 +
-            # teammate 完成通知 _on_done→_recipients["lead"])。lead 的 deliver =
-            # controller.receive(格式化 peer 消息入队、空闲时后台起 drain)。全程同一
-            # TurnController 实例(/clear 只重绑 _store),reset() 据此保留 lead 注册。
-            self._team_mgr.register("lead", self.controller.receive)
-            for _team_tool in (
-                SendMessageTool(self._team_mgr),
-                TaskCreateTool(self._team_mgr),
-                TaskListTool(self._team_mgr),
-                TaskUpdateTool(self._team_mgr),
-                TaskClaimTool(self._team_mgr),
-            ):
-                self._tool_registry.register(_team_tool)
             # 每个 defn(agent 或 skill)→ 一个 tool;skill 另注册斜杠命令。
             common = dict(
                 cfg=self._cfg,
@@ -579,21 +502,6 @@ class BirdApp(App[None]):
                 register_agent_tools(self._tool_registry, caps, **common)
                 skill_tools = register_skill_tools(self._tool_registry, caps, **common)
                 register_skill_commands(self._command_registry, caps, skill_tools)
-                # SpawnTeammate(P5):用 general-purpose defn;caps 无则跳过(友好降级)。
-                gp_defn = next((d for d in caps.all() if d.name == "general-purpose"), None)
-                if gp_defn is not None and self._team_mgr is not None:
-                    from birdcode.tools.spawn_teammate_tool import SpawnTeammateTool
-
-                    self._tool_registry.register(
-                        SpawnTeammateTool(
-                            team_mgr=self._team_mgr, defn=gp_defn,
-                            cfg=self._cfg, app=self, ctx=self._store.ctx,
-                            project_root=self._cfg.project_root or Path("."),
-                            parent_provider=cast("ParentProvider", self._provider),
-                            parent_registry=self._tool_registry,
-                            parent_gate=self._gate, progress_cb=self._on_subagent_progress,
-                        )
-                    )
                 # ResumeAgentTool(主 agent 中介续跑,T9):单工具(非 per-defn),name 固定
                 # resume_agent。在 try 内注册:需 caps 作 agent_registry;caps 构造或能力
                 # 注册因名冲突失败时,本工具一并跳过(冲突已降级 warning,不杀 on_mount)。
@@ -1258,10 +1166,6 @@ class BirdApp(App[None]):
             # 异步子 agent manager 也重绑到新会话句柄(否则完成通知注入旧 session)。
             if self._subagent_mgr is not None:
                 self._subagent_mgr.rebind(store=self._store, controller=self.controller)
-            # agent teams:/clear 切新 session → 旧 team 终止 + 清(team_mgr 引用保留,
-            # team 工具不重注册;reset 内 cancel_all + 清 registry/board)。
-            if self._team_mgr is not None:
-                self._team_mgr.reset()
         except Exception:
             log.warning("/clear 重接 sink/gate/read_history 失败", exc_info=True)
         return new_sid
@@ -1531,8 +1435,6 @@ class BirdApp(App[None]):
         # Esc 同时终止在跑的异步子 agent(不分忙闲——空闲时也可能有后台子 agent 在跑)。
         if self._subagent_mgr is not None:
             self._subagent_mgr.cancel_all()
-        if self._team_mgr is not None:
-            self._team_mgr.cancel_all()
 
     async def action_quit(self) -> None:
         self.exit()
@@ -1552,24 +1454,16 @@ class BirdApp(App[None]):
         if self._controller is not None:
             self._controller.begin_shutdown()
         try:
-            # 1) 取消在跑的 teammate / 异步子 agent:退出时别让它们悬挂(meta 卡 running/idle、
+            # 1) 取消在跑的异步子 agent:退出时别让它们悬挂(meta 卡 running/idle、
             #    侧链写一半)。cancel 经 runner CancelledError 路径落 meta=cancelled + close store。
-            if self._team_mgr is not None:
-                self._team_mgr.cancel_all()
             if self._subagent_mgr is not None:
                 self._subagent_mgr.cancel_all()
-            # F5:await 两者 task 终止 → runner.run() finally 内的 shielded worktree cleanup
+            # F5:await 子 agent task 终止 → runner.run() finally 内的 shielded worktree cleanup
             # (git unlock/remove/branch-d)在 live loop 上跑完。不 await 则关 loop 时砍断 cleanup
-            # → 每次裸退出留一批 git-locked worktree(teammate/async-subagent 的 agent_id 随机,
-            # 跨会话不复用,create_worktree 的快速恢复救不了)。#9:两者并发 gather(各自内部 5s
-            # 超时),避免串行 5s+5s≈10s 退出卡顿;return_exceptions 兜底,join_all 自身不抛。
-            joins: list = []
-            if self._team_mgr is not None:
-                joins.append(self._team_mgr.join_all())
+            # → 每次裸退出留一批 git-locked worktree(async-subagent 的 agent_id 随机,跨会话
+            # 不复用,create_worktree 的快速恢复救不了)。
             if self._subagent_mgr is not None:
-                joins.append(self._subagent_mgr.join_all())
-            if joins:
-                await asyncio.gather(*joins, return_exceptions=True)
+                await self._subagent_mgr.join_all()
             # 2) 收尾后台 startup task。无条件 await(即使已完成):检索其异常,防 asyncio
             # "Task exception was never retrieved" 警告 + 静默丢弃(startup 尾巴的 BaseException
             # 如 SystemExit 逃过 _start_mcp_background 的 except Exception 时)。cancel 仅未完成者。

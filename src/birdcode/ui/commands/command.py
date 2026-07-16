@@ -10,9 +10,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from birdcode.agent.context import CompactionResult
     from birdcode.agent.provider import TokenUsage
-    from birdcode.agents.teammate import TeamManager
     from birdcode.config.schema import AppConfig
-    from birdcode.conversation import Turn as ConversationTurn
     from birdcode.conversation import TurnController
     from birdcode.mcp.client import McpManager
     from birdcode.session.store import SessionStore
@@ -70,11 +68,3 @@ class CommandContext(Protocol):
     def cfg(self) -> AppConfig | None: ...
     @property
     def model(self) -> str: ...
-
-    # —— agent teams(P5)——
-    @property
-    def team_mgr(self) -> TeamManager | None: ...
-
-    def list_teammates(self) -> list[dict[str, str]]: ...
-
-    def read_teammate_transcript(self, agent_id: str) -> list[ConversationTurn]: ...

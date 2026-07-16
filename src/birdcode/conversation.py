@@ -21,7 +21,6 @@ from birdcode.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from birdcode.agent.context import ContextManager
-    from birdcode.agents.mailbox import MailboxMessage
     from birdcode.memory.extractor import MemoryManager
     from birdcode.memory.governance import GovernanceManager
     from birdcode.permission.rules import Rule
@@ -72,35 +71,24 @@ class _WakeInput:
 _WAKE = _WakeInput()
 
 
-class _PeerInput:
-    """teammate→lead 的 peer 消息(入队项):包文本,与用户文本(str)区分。
-
-    不计入 _user_count(状态栏「排队消息」只含用户文本;peer 消息不虚增)。
-    _drain 用 isinstance(_PeerInput) 分派到 _process(unwrap .text)。
-    """
-
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
 class MessageQueue:
-    """FIFO type-ahead/wake/peer 队列。
+    """FIFO type-ahead/wake 队列。
 
-    项为用户文本(str)/唤醒标记(_WakeInput)/peer 消息(_PeerInput)。
+    项为用户文本(str)/唤醒标记(_WakeInput)。
     """
 
     def __init__(self) -> None:
-        self._q: asyncio.Queue[str | _WakeInput | _PeerInput] = asyncio.Queue()
-        # 状态栏「排队消息」计数只含用户文本(str);_WakeInput/_PeerInput 不计入,否则
+        self._q: asyncio.Queue[str | _WakeInput] = asyncio.Queue()
+        # 状态栏「排队消息」计数只含用户文本(str);_WakeInput 不计入,否则
         # 忙时若干异步子 agent 完成会虚增 ⌛N(误显为用户在排队输入)。
         self._user_count = 0
 
-    def enqueue(self, item: str | _WakeInput | _PeerInput) -> None:
+    def enqueue(self, item: str | _WakeInput) -> None:
         self._q.put_nowait(item)
         if isinstance(item, str):
             self._user_count += 1
 
-    def dequeue_nowait(self) -> str | _WakeInput | _PeerInput | None:
+    def dequeue_nowait(self) -> str | _WakeInput | None:
         try:
             item = self._q.get_nowait()
         except asyncio.QueueEmpty:
@@ -194,25 +182,6 @@ class TurnController:
             self._drain_task = task
             task.add_done_callback(self._on_drain_done)
 
-    def receive(self, msg: MailboxMessage) -> None:
-        """teammate 发来的消息:格式化 str 入队,空闲时后台起 _drain(不阻塞投递方,仿 notify_wake)。
-
-        与 submit(用户输入,空闲时 await drain)和 notify_wake(系统注入)并列:teammate 消息
-        走 str 分派(_drain→_process),与 _WakeInput(_process_wake)井水不犯河水。现有
-        user/notify_wake/异步子 agent 通知流程全不变。
-
-        退出态同 notify_wake:直接 return(免退出期起新后台 drain,#1)。
-        """
-        if self._shutting_down:
-            return
-        text = f"[来自 {msg.sender}]: {msg.content}"
-        self._queue.enqueue(_PeerInput(text))  # peer 消息不计 _user_count(状态栏不虚增)
-        if not self.busy:
-            self.busy = True
-            task = asyncio.create_task(self._drain())
-            self._drain_task = task
-            task.add_done_callback(self._on_drain_done)
-
     def _on_drain_done(self, task: asyncio.Task[None]) -> None:
         """后台 drain 完成回调:按身份清引用(防覆盖更新的 drain task)+ 记录未检索异常。"""
         if self._drain_task is task:
@@ -226,13 +195,12 @@ class TurnController:
     def begin_shutdown(self) -> None:
         """退出(on_unmount 最先调):抑制后续后台 drain + 取消已起的 orphan drain(#1)。
 
-        notify_wake/receive 空闲时 create_task(_drain) 跑 run_agent_loop。退出收尾链
+        notify_wake 空闲时 create_task(_drain) 跑 run_agent_loop。退出收尾链
         (cancel_all→join_all→_supervise→_inject→notify_wake)若在退出期触发,会起一个
         on_unmount 既不 await 也不 cancel 的 orphan drain,在 MCP/store 的 await 期间跑 LLM 轮 +
-        工具(Write/Bash)——d37798c 的 join_all 把它从偶发变成确定。置 _shutting_down 后
-        notify_wake/receive 直接 return(不起新 drain);并取消已起的 _drain_task(退出前夕刚好
-        有子 agent/teammate 完成触发的尾音)。busy 内联 drain(submit 驱动,_stream_task 链)是
-        退出前既有行为、非本提交引入,不在此处置理。
+        工具(Write/Bash)。置 _shutting_down 后 notify_wake 直接 return(不起新 drain);
+        并取消已起的 _drain_task(退出前夕刚好有异步子 agent 完成触发的尾音)。busy 内联
+        drain(submit 驱动,_stream_task 链)是退出前既有行为、非本提交引入,不在此处置理。
         """
         self._shutting_down = True
         if self._drain_task is not None and not self._drain_task.done():
@@ -344,21 +312,13 @@ class TurnController:
         _WakeInput 一并丢弃)。submit 空闲路径 await 本方法(同步语义);notify_wake 空闲路径
         create_task 本方法(后台),二者共享同一 drain 循环,绝不并发起两个 drain。
 
-        _drain 跑在 lead 的 TurnController 内,恒以 "lead" 身份运行:receive 经 teammate task
-        调用 create_task(_drain) 时,新 task 会复制投递方(teammate)的 context(_AGENT_NAME=
-        teammate 名);不在本处钉回,lead 本轮(run_agent_loop 及其工具调用)会把 SendMessage/
-        TaskCreate 的 sender 误归属到该 teammate。显式 set("lead") 只影响本 drain task 的 context
-        副本(create_task 拷贝 / submit 的主任务本就是 lead),不污染原 teammate task。
-
-        _AGENT_CWD 同源漏:worktree teammate 在 runner 内 set _AGENT_CWD=<worktree>,经同一
-        create_task 拷贝进本 drain task;不钉回则 lead 本轮的 Git 系统提醒(_resolve_cwd 读
-        _AGENT_CWD)会报 teammate worktree 的分支/脏状态,而非主仓。set(None) 钉回 → _resolve_cwd
-        落 Path.cwd()(lead 主仓),同样只影响本 drain task 的 context 副本。
+        _AGENT_CWD 钉回:worktree 子 agent 在 runner 内 set _AGENT_CWD=<worktree>,经
+        create_task 拷贝可能渗进本 drain task;不钉回则 lead 本轮的 Git 系统提醒(_resolve_cwd
+        读 _AGENT_CWD)会报子 agent worktree 的分支/脏状态,而非主仓。set(None) 钉回 →
+        _resolve_cwd 落 Path.cwd()(lead 主仓),只影响本 drain task 的 context 副本。
         """
         from birdcode.agent.system_prompt.env import _AGENT_CWD
-        from birdcode.agents.mailbox import _AGENT_NAME
 
-        _AGENT_NAME.set("lead")
         _AGENT_CWD.set(None)
         try:
             while True:
@@ -368,8 +328,6 @@ class TurnController:
                 await self._on_status()
                 if isinstance(item, _WakeInput):
                     await self._process_wake()
-                elif isinstance(item, _PeerInput):
-                    await self._process(item.text)
                 else:
                     await self._process(item)
         finally:
