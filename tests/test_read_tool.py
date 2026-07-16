@@ -107,11 +107,11 @@ def test_read_description_and_name() -> None:
 
 
 def test_set_tool_results_dir_sets_attr(tmp_path: Path) -> None:
-    """set_tool_results_dir 注入会话 tool-results 目录(供尺寸闸豁免判定)。"""
+    """set_tool_results_dir 注入会话 tool-results 目录(缓存 resolve() 后的路径,供豁免判定)。"""
     tool = ReadTool()
     assert tool._tool_results_dir is None  # 默认 None
     tool.set_tool_results_dir(tmp_path)
-    assert tool._tool_results_dir == tmp_path
+    assert tool._tool_results_dir == tmp_path.resolve()  # 缓存 resolve(免每次 read_file 解析)
 
 
 def test_fork_for_child_does_not_propagate_tool_results_dir(tmp_path: Path) -> None:
@@ -140,6 +140,48 @@ async def test_oversized_sidecar_under_tool_results_dir_is_paginated(tmp_path: P
     out = await tool.execute(file_path=str(f), limit=10)
     assert "<error>" not in out or "文件过大" not in out  # 不被尺寸闸拒
     assert "1\t" in out  # 读到内容(行号 1)
+
+
+async def test_oversized_sidecar_multiline_paginates_via_stream(tmp_path: Path) -> None:
+    """>500KB 多行 sidecar:流式按 offset/limit 分页读回(不整文件 read_bytes 入内存)。
+
+    内存恒为 O(limit×行长 + 块),sidecar 无上限也不 OOM。补 F1(流式分页读)。
+    """
+    from birdcode.tools.read_tool import _MAX_READ_BYTES
+
+    sidecar_dir = tmp_path / "tool-results"
+    sidecar_dir.mkdir()
+    f = sidecar_dir / "big.txt"
+    # ~600KB 多行:每行 "rowNNNNN" 8 字节 + \n = 9 字节,68000 行 ≈ 612KB > 500KB
+    f.write_text("\n".join(f"row{i:05d}" for i in range(68000)) + "\n", encoding="utf-8")
+    assert f.stat().st_size > _MAX_READ_BYTES
+    tool = ReadTool()
+    tool.set_tool_results_dir(sidecar_dir)
+    out1 = await tool.execute(file_path=str(f), offset=1, limit=5)
+    assert "<error>" not in out1
+    assert "1\trow00000" in out1
+    assert "5\trow00004" in out1
+    assert "6\t" not in out1  # 不超 limit
+    # 第二页:offset 跨过第一页,行号/内容正确续接
+    out2 = await tool.execute(file_path=str(f), offset=6, limit=5)
+    assert "6\trow00005" in out2
+    assert "10\trow00009" in out2
+
+
+async def test_sidecar_offset_beyond_scan_budget_hint(tmp_path: Path, monkeypatch) -> None:
+    """offset 落在扫描字节预算外 → 报错并提示 bash sed/head(不无限扫描巨大 sidecar)。"""
+    from birdcode.tools import read_tool as rt
+
+    monkeypatch.setattr(rt, "_MAX_SIDECAR_SCAN_BYTES", 4096)  # 极小预算,逼预算耗尽分支
+    sidecar_dir = tmp_path / "tool-results"
+    sidecar_dir.mkdir()
+    f = sidecar_dir / "big.txt"
+    f.write_text("\n".join(f"row{i:05d}" for i in range(68000)) + "\n", encoding="utf-8")
+    tool = ReadTool()
+    tool.set_tool_results_dir(sidecar_dir)
+    out = await tool.execute(file_path=str(f), offset=100_000)  # 远超 4KB 预算能扫到的行
+    assert "<error>" in out
+    assert "sed" in out or "head" in out or "bash" in out  # 指向可行逃生
 
 
 async def test_oversized_non_sidecar_still_rejected(tmp_path: Path) -> None:

@@ -133,11 +133,10 @@ class SnipCandidate:
     """snip 决策用的 tool_result 快照(瞬时:每次 _snip 从 history 现场建,用完丢)。
 
     size/replaced 从 block.content 派生(单一真相源,无跨轮存储);block 是原地改
-    content 的反向引用。name 供未来按工具类型差异化策略(现仅记录)。
+    content 的反向引用。
     """
 
     tool_use_id: str
-    name: str
     size: int  # len(block.content):当前占用 context 的真实大小(非原始 size)
     replaced: bool  # block.content == _SNIP_PLACEHOLDER
     block: ToolResultBlock
@@ -358,21 +357,17 @@ class ContextManager:
     def _build_candidates(self, history: list[Turn]) -> list[SnipCandidate]:
         """遍历 history,为每个 ToolResultBlock 建 SnipCandidate(瞬时派生)。
 
-        同步收集 tool_use id→name(assistant 消息里),遇 tool_result 配对取 name。
-        返回顺序 = history 顺序(供 _protected_ids 按 recency 补足用)。
+        返回顺序 = history 顺序(供 _protected_ids 按 recency 补足用)。ToolUseBlock 不产生候选
+        (snip 只改 tool_result content,无需 id→name 配对)。
         """
-        id_to_name: dict[str, str] = {}
         out: list[SnipCandidate] = []
         for turn in history:
             for m in turn.messages:
                 for b in m.content:
-                    if isinstance(b, ToolUseBlock):
-                        id_to_name[b.id] = b.name
-                    elif isinstance(b, ToolResultBlock):
+                    if isinstance(b, ToolResultBlock):
                         out.append(
                             SnipCandidate(
                                 tool_use_id=b.tool_use_id,
-                                name=id_to_name.get(b.tool_use_id, ""),
                                 size=len(b.content),
                                 replaced=b.content == _SNIP_PLACEHOLDER,
                                 block=b,
@@ -450,6 +445,12 @@ class ContextManager:
         # 贪心:清最大的,直到 est_now < 阈值 且 cleared ≥ 最小清理量(pre-check 保证可达)。
         cleared = 0
         for idx, c in enumerate(snippable):
+            # 占位符比原文还长的小块(clearable≤0)清了反涨 context → 跳过(不占位、不计 cleared)。
+            # 刀锋情形(deficit==max_clearable,清完大块恰好压到阈值、==而非 <)下,无此守卫会继续
+            # 把尾部小块换成更长的占位符 → 原文丢失、post 可超 pre。大块在 sort 前部,此处理论上
+            # 只遍历到尾部小块(全小块时 max_clearable=0 < required,已被 pre-check 分流)。
+            if clearable_tokens[idx] <= 0:
+                continue
             if (
                 pre_cold - cleared < self._cfg.autocompact_threshold
                 and cleared >= _SNIP_CLEAR_AT_LEAST
@@ -459,7 +460,10 @@ class ContextManager:
             cleared += clearable_tokens[idx]
 
         self._stale_anchor = True  # 旧 last_in 反映 snip 前大输入,下轮冷启动估
-        post = self._est.estimate(history=history, current=current, last_in=None)
+        # post 由 cleared 推算(char_to_token 对拼接可加,误差仅每块一次 int 截断的微量噪声;clearable
+        # 均 max(0,·) → cleared≥0 → post≤pre_cold,UI 不会 post>pre,且与 pre 同 cold 口径)。省一次
+        # 全量 O(history) cold 估。
+        post = max(0, pre_cold - cleared)
         result = CompactionResult(
             trigger="snip",
             pre_tokens=pre_cold,

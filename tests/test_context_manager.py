@@ -201,8 +201,9 @@ def test_split_prefix_tail_handles_tool_result_blocks():
     assert all(t in turns for t in prefix + tail)
 
 
-def test_build_candidates_pairs_name_size_replaced():
-    """_build_candidates:配对 tool_use→name、size=len(content)、replaced、block 反引。"""
+def test_build_candidates_pairs_size_replaced_block():
+    """_build_candidates:每个 ToolResultBlock → SnipCandidate(size=len(content)、replaced、
+    block 反引);ToolUseBlock 不产生候选(只统计 tool_result)。"""
     from birdcode.agent.context import _SNIP_PLACEHOLDER
     from birdcode.blocks import ToolResultBlock, ToolUseBlock
 
@@ -217,14 +218,12 @@ def test_build_candidates_pairs_name_size_replaced():
         ]),
     ]
     cands = cm._build_candidates(turns)
-    assert len(cands) == 2
+    assert len(cands) == 2  # 仅 2 个 tool_result;tool_use 不产生候选
     by_id = {c.tool_use_id: c for c in cands}
-    assert by_id["tu1"].name == "bash"
     assert by_id["tu1"].size == len("BIG" * 100)
     assert by_id["tu1"].replaced is False
     assert by_id["tu1"].block.tool_use_id == "tu1"
     assert by_id["tu2"].replaced is True
-    assert by_id["tu2"].name == ""  # 无配对 tool_use → 空
 
 
 # —— Tier2 snip(size 优先 + 保护最近完整 turn + 最小清理量)——
@@ -282,6 +281,50 @@ async def test_snip_clears_only_largest_then_stops_at_clear_at_least():
     assert bo[1].content == "M" * 10000         # MID 保留(已满足最小量 → 停)
     assert bo[2].content == "S" * 2000          # SMALL 保留
     assert recent.messages[0].content[0].content == "w" * 1000  # 保护集未动
+
+
+async def test_snip_skips_blocks_smaller_than_placeholder():
+    """占位符比原文长的小 tool_result(clearable≤0)不清,绝不 post>pre、原文不丢。
+
+    刀锋构造:deficit == 最大可清块的 net → 清完大块恰好压到阈值(== 非 <),贪心循环会
+    继续走向尾部 tiny 候选。无 clearable≤0 守卫时 tiny 被换成更长的占位符 → 原文丢失,
+    且 tiny 足够多时 post 可超 pre;有守卫时跳过 → tiny 原文保留、post<pre。
+    """
+    from birdcode.agent.context import _SNIP_CLEAR_AT_LEAST, _SNIP_PLACEHOLDER
+    from birdcode.blocks import ToolResultBlock
+
+    est = TokenEstimator()
+    ph_tokens = est.char_to_token(_SNIP_PLACEHOLDER)
+    big = "B" * 24_000
+    big_clearable = est.char_to_token(big) - ph_tokens
+    assert big_clearable >= _SNIP_CLEAR_AT_LEAST  # 大块单独够最小清理量
+    # old:big + 200 个 tiny(最旧 → 在保护集外、snippable)+ 4 filler(被保护集补足)。
+    # 保护集 = recent(1) + 按 recency 补到 _SNIP_KEEP(再取 4 个 old 最新的 filler)。
+    old = _results_turn(
+        big, *["a"] * 200, "f" * 10, "f" * 10, "f" * 10, "f" * 10, start=0
+    )
+    recent = _results_turn("w" * 60_000, start=10)  # 受保护,撑大 pre_cold
+    turns = [old, recent]
+    pre_cold = est.estimate(history=turns, current=[], last_in=None)
+    # threshold = pre_cold - big_clearable → deficit 恰 = big_clearable(清完大块 == 阈值,刀锋)。
+    threshold = pre_cold - big_clearable
+    cm = _cm(
+        context_window=threshold + 1024,
+        compact_summary_reserve=1024,
+        compact_safety_margin=0,
+    )
+    res = await cm._snip(turns, current=[])
+    assert res is not None and res.trigger == "snip"
+    assert res.pre_tokens >= res.post_tokens  # 关键不变量:绝不涨
+    # tiny 原文保留(200 个均未被占位)
+    contents = [
+        b.content
+        for t in turns
+        for m in t.messages
+        for b in m.content
+        if isinstance(b, ToolResultBlock)
+    ]
+    assert contents.count("a") == 200
 
 
 async def test_snip_idempotent_excludes_already_placeholdered():
@@ -355,9 +398,9 @@ async def test_snip_over_threshold_insufficient_goes_to_compact_sees_originals()
             super().__init__(summary_text="SUM")
             self.seen_prefix: list | None = None
 
-        async def summarize_with_prefix(  # noqa: ANN001
-            self, *, prefix, instruction, max_tokens
-        ):
+        async def summarize_with_prefix(
+            self, *, prefix: list[Message], instruction: str, max_tokens: int
+        ) -> str:
             self.seen_prefix = prefix
             return await super().summarize_with_prefix(
                 prefix=prefix, instruction=instruction, max_tokens=max_tokens
