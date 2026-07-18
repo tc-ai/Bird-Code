@@ -41,6 +41,19 @@ def test_list_subagent_metas(tmp_path):
     assert {m.agent_id for m in metas} == {"a1", "a2"}
 
 
+def test_list_subagent_metas_sorted(tmp_path):
+    """list_subagent_metas 按 agent_id 确定序:glob 顺序随文件系统而异(ext4 哈希序),
+    排序保证 reminder 行 / UI 列表 / 测试断言稳定(防 review Finding 11)。"""
+    # 故意反向写入,验证顺序不依赖写入序
+    for aid in ("sub-3", "sub-1", "sub-2"):
+        write_subagent_meta(
+            tmp_path / f"agent-{aid}.meta.json",
+            SubagentMeta(agent_id=aid, tool_use_id=f"c-{aid}"),
+        )
+    metas = list_subagent_metas(tmp_path)
+    assert [m.agent_id for m in metas] == ["sub-1", "sub-2", "sub-3"]
+
+
 def test_read_non_utf8_returns_none(tmp_path):
     """CR #4: 非 UTF-8 字节(崩溃转储/外部编辑)→ None,不杀 /agents 视图。
 

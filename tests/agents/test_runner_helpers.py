@@ -148,6 +148,34 @@ def test_max_spawn_depth_is_one():
     assert MAX_SPAWN_DEPTH == 1
 
 
+def test_update_meta_freezes_lost_status(tmp_path):
+    """_update_meta 守卫:status==lost 时不再被生命周期写覆盖(防丢弃的 agent 复活)。
+
+    防 review Finding 7:用户 2/No 已落 lost,但 async 子 agent 的 cancel 落盘晚于此时,
+    runner except CancelledError 的 _update_meta(status="cancelled") 若无守卫会覆盖 lost →
+    cancelled ∈ RESUMABLE_STATUSES → 跨会话再弹,违背"永久丢弃"。
+    """
+    from birdcode.agents.runner import _update_meta
+    from birdcode.session.models import SubagentMeta
+    from birdcode.session.subagent_meta import read_subagent_meta, write_subagent_meta
+
+    p = tmp_path / "agent-sub.meta.json"
+    write_subagent_meta(
+        p,
+        SubagentMeta(
+            agent_id="sub",
+            agent_type="general-purpose",
+            tool_use_id="tu",
+            status="lost",
+        ),
+    )
+    # 模拟 runner 的生命周期写(cancel/complete)落到已 lost 的 meta 上
+    _update_meta(p, status="cancelled")
+    back = read_subagent_meta(p)
+    assert back is not None
+    assert back.status == "lost"  # 守卫:未被 cancelled 覆盖
+
+
 def test_child_registry_async_replaces_ask_user_with_stub():
     """is_async=True:ask_user(is_ask_user)→AskUserAsyncStub(不 fork 原 tool);同步保留原 tool。"""
     from birdcode.tools.ask_user import AskUserAsyncStub, AskUserTool

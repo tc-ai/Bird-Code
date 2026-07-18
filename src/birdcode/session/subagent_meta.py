@@ -43,7 +43,9 @@ def list_subagent_metas(subagents_dir: Path) -> list[SubagentMeta]:
     if not subagents_dir.exists():
         return []
     out: list[SubagentMeta] = []
-    for p in subagents_dir.glob("agent-*.meta.json"):
+    # sorted:glob 顺序随文件系统而异(ext4 哈希序、非确定),排序保证 reminder 行 / UI
+    # 列表 / 测试断言顺序确定(否则同批 agent 在不同刷新里列序漂移,LLM 上下文也不稳)。
+    for p in sorted(subagents_dir.glob("agent-*.meta.json")):
         m = read_subagent_meta(p)
         if m is not None:
             out.append(m)

@@ -34,6 +34,8 @@ def _fake_app(tmp_path: Path) -> SimpleNamespace:
     fake._current_subagents_dir = MethodType(BirdApp._current_subagents_dir, fake)
     fake._rewrite_reminder = MethodType(BirdApp._rewrite_reminder, fake)
     fake._rewrite_dismissal = MethodType(BirdApp._rewrite_dismissal, fake)
+    # _on_resume_dismissed 末尾回焦主输入:fake 无 #input,真实方法内 try/except 跳过即可。
+    fake._refocus_main_input = MethodType(BirdApp._refocus_main_input, fake)
     return fake
 
 

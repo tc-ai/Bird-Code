@@ -239,3 +239,37 @@ async def test_press_1_yes_submits_continue(
         assert submitted == ["继续"], "1/Yes 应触发 controller.submit('继续')"
         # widget 已卸载(action_confirm 内 self.remove())
         assert list(app.query("ResumePrompt")) == []
+
+
+# ---- 用例 5:ResumePrompt 挂载即取焦(1/2 键可用);dismiss 后回焦主输入 ----
+
+
+async def test_resume_prompt_takes_focus_and_refocuses_input(tmp_path: Path) -> None:
+    """ResumePrompt mount 即取焦 → 1/2 键生效;按 2/No 卸载后焦点回主输入。
+
+    防 review Finding:旧 _mount_resume_prompt 未 focus(),数字键 1/2 落到 InputArea
+    被当普通字符,action_confirm/action_ignore 不触发(对齐 PermissionPrompt/ChoicePrompt
+    均 mount 后 focus)。dismiss 后焦点回归 #input —— Textual 移除已聚焦 widget 的落点
+    不保证是主输入,需显式 _refocus_main_input。
+    """
+    store = _make_store(tmp_path, "e2e-focus")
+    _seed_meta(store, "sub-A", status="cancelled")
+
+    app = BirdApp(MockProvider(delay=0.0), store=store, resume=False)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        assert isinstance(app.focused, InputArea)  # on_mount 焦点在主输入
+
+        await app._refresh_resume_prompt(force_show=True)
+        await pilot.pause()
+        prompt = app.query_one("ResumePrompt")
+        # 挂载后焦点应在 ResumePrompt:1/2 键才会触发 action_confirm/action_ignore
+        assert app.focused is prompt
+
+        # 按 2/No → widget 卸载 + bg 任务;焦点应回主输入(用户继续打字)
+        await prompt.action_ignore()
+        await pilot.pause()
+        await _drain_bg_tasks(app)
+
+        assert list(app.query("ResumePrompt")) == []
+        assert isinstance(app.focused, InputArea)

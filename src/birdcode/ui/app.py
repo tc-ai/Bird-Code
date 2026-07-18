@@ -740,12 +740,25 @@ class BirdApp(App[None]):
                 )
         self._shown_agent_ids |= ids
 
+    def _refocus_main_input(self) -> None:
+        """best-effort 把焦点回主输入(ResumePrompt 曾持焦点,卸载后用户继续打字)。
+
+        ResumePrompt mount 时取焦(1/2 键可用);用户按下 1/2 后 widget self.remove(),
+        焦点需显式回归 #input——Textual 移除已聚焦 widget 时的落点不保证是主输入。
+        对齐 ChoicePrompt 的 ask_user finally(main_input.focus())。
+        """
+        try:
+            self.query_one("#input", InputArea).focus()
+        except Exception:  # noqa: BLE001 - 无 #input(测试/非 BirdApp)→ 跳过
+            log.debug("refocus #input 失败", exc_info=True)
+
     async def _on_resume_confirmed(self) -> None:
         """用户按 1/Yes:把"继续"送主 agent(经 TurnController 入队 → 主 agent 循环)。
 
         主 agent 见 _reminder_turn 清单后调 resume_agent 逐个续跑。
         """
         await self.controller.submit("继续")
+        self._refocus_main_input()
 
     async def _on_resume_dismissed(self, aids: list[str]) -> None:
         """用户按 2/No(整批):每个 agent 标 lost + 重写 reminder(保留其它可续)+ 反信号。
@@ -767,6 +780,7 @@ class BirdApp(App[None]):
         )
         await self._rewrite_reminder(metas)
         await self._rewrite_dismissal()
+        self._refocus_main_input()
 
     async def _on_interrupt_scan(self) -> None:
         """ESC 中断后:延迟一拍(等 runner except CancelledError 落 meta=cancelled/
@@ -802,7 +816,10 @@ class BirdApp(App[None]):
                 (m.agent_id, (m.prompt or m.description or "(无描述)")[:100])
                 for m in metas
             ]
-            await self.query_one("#scroll").mount(ResumePrompt(descriptions=descriptions))
+            prompt = ResumePrompt(descriptions=descriptions)
+            await self.query_one("#scroll").mount(prompt)
+            # 1/2 键需焦点才触发;对齐 PermissionPrompt/ChoicePrompt(mount 后 focus)
+            prompt.focus()
         except Exception:  # noqa: BLE001 - 挂载失败不影响 reminder 注入或 resume
             log.debug("mount resume prompt failed", exc_info=True)
 
@@ -1258,6 +1275,15 @@ class BirdApp(App[None]):
         try,自身不会抛),保证「只读当前会话」不变式必成立,即使后面 sink/gate rehook 抛异常。
         """
         self.controller.abort()
+        # 取消上一会话残留的后台任务(resume 丢弃/中断扫描/submit 轮次),免其跨 /clear 操作
+        # 新会话——典型泄漏:_on_resume_dismissed 把旧 aids 累积进【已清空】的 _lost_agent_ids、
+        # 再把反信号 Turn 注入新会话历史,使新会话 LLM 见到针对不存在 agent 的丢弃提示。
+        # _reap_bg_task 兜底回收 CancelledError(task.cancelled() 即早退)。须在 reopen 与下方
+        # 首个 await(_close_markdown)之前:cancel 早于任何让出事件循环的时机,被取消的任务若
+        # 尚未首跑则不再执行其函数体,若已停在首个 await 则不再继续 rewrite。
+        for task in list(self._bg_tasks):
+            task.cancel()
+        self._bg_tasks.clear()
         await self._close_markdown()
         scroll = self.query_one("#scroll")
         for w in list(scroll.children):

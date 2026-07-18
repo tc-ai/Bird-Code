@@ -179,6 +179,12 @@ def _update_meta(meta_path: Path, **changes: object) -> None:
     existing = read_subagent_meta(meta_path)
     if existing is None:
         return  # launched 写失败则无 meta 可更新;不杀运行
+    if existing.status == "lost":
+        # lost = 用户 2/No 永久丢弃,终态冻结。runner 的生命周期写(completed/error/cancelled)
+        # 不得覆盖 lost——否则被丢弃的 agent 又变可续,跨会话再弹,违背"永久丢弃"。防窄竞态:
+        # async 子 agent 的 cancel 落盘晚于用户 2/No 时,except CancelledError 的
+        # _update_meta(status=cancelled) 不应改写已落的 lost。
+        return
     data = existing.model_dump(by_alias=True)
     data.update(changes)
     try:
