@@ -88,6 +88,14 @@ async def resume_subagent(*, agent_id: str, direction: str, deps: ResumeDeps) ->
             text=f"{agent_id} 已完成,无需续跑",
         )
 
+    # lost = 用户按 2/No 永久丢弃,不可续。discover 不返回 lost、reminder 不列 lost,
+    # 正常不会触发;此守卫纯 belt-and-suspenders(防陈旧 reminder 误导主 agent 调 resume_agent)。
+    if meta.status == "lost":
+        return ResumeResult(
+            outcome="sync_done",
+            text=f"{agent_id} 已被用户丢弃，不再续跑",
+        )
+
     if deps.manager.has_live(agent_id):  # 幂等:已在跑,不重复 launch
         return ResumeResult(outcome="in_progress", text=f"{agent_id} 已在运行中")
 

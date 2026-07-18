@@ -38,7 +38,7 @@ _process_wake→dequeue 消费)。
     侧链 + 主 jsonl 文件 IO / TurnController notify_wake→_process_wake→run_agent_loop。
   - mock:resume_mod.SubagentRunner(_FakeRunner,其 run() 返固定 completed 报告,避免真实
     LLM 调用);主 agent provider(_MainProvider,固定文本 + Done,避免 LLM 智力与真实
-    工具执行);_maybe_route_continue 的 _inject_resumable_reminder 回调(代表橙色 widget
+    工具执行);_maybe_route_continue 的 _refresh_resume_prompt 回调(代表橙色 widget
     + reminder Turn 的 UI 副作用,具体验证属 T10/T11)。
   - 不验证:LLM 智力、真实工具副作用、Textual pilot UI 接线(均 mock/简化)。聚焦
     「cancelled → 发现(两层)→ 路由拦截 → 续跑闭环 → 完成注入 → 主 jsonl 有
@@ -280,23 +280,23 @@ async def _wait_until_idle(ctrl: TurnController, *, timeout: float = 2.0) -> Non
 def _build_route_fake_self(store: SessionStore) -> SimpleNamespace:
     """构造覆盖 _maybe_route_continue 全部 self 属性的 fake(范式同 T12 单测)。
 
-    _maybe_route_continue 内:self._store / self._controller 校验存在;真扫描后命中则调
-    self._inject_resumable_reminder(代表橙色 ResumePrompt + reminder Turn 的 UI 副作用,
-    具体验证属 T10/T11)。返回的 ns 暴露 inject_calls 记录 + 绑真实 _maybe_route_continue
+    Task 7 后:_maybe_route_continue 命中"继续"调 self._refresh_resume_prompt(force_show=True)
+    (代表橙色 ResumePrompt + reminder Turn 的 UI 副作用,具体验证属 T10/T11)。
+    返回的 ns 暴露 refresh_calls(记录 force_show 值)+ 绑真实 _maybe_route_continue
     方法(经 types.MethodType 绑定,使 self 正确传递)。
     """
-    inject_calls: list[int] = []
+    refresh_calls: list[bool] = []
 
-    async def _fake_inject() -> None:
-        inject_calls.append(1)
+    async def _fake_refresh(*, force_show: bool = False) -> None:
+        refresh_calls.append(force_show)
 
     ns = SimpleNamespace(
         _store=store,
         _controller=object(),  # 非 None 即可(_maybe_route_continue 只校验 is None)
         _bg_tasks=set(),
     )
-    ns.inject_calls = inject_calls
-    ns._inject_resumable_reminder = _fake_inject
+    ns.refresh_calls = refresh_calls
+    ns._refresh_resume_prompt = _fake_refresh
     # 绑真实方法(未绑形式 → 用 types.MethodType 绑到 fake_self,使 self 正确传递)
     ns._maybe_route_continue = types.MethodType(BirdApp._maybe_route_continue, ns)
     return ns
@@ -370,18 +370,19 @@ async def test_esc_cancelled_then_continue_rediscovers(tmp_path: Path, monkeypat
 
         # ===== ③ "继续"路由发现它(T12 _maybe_route_continue,真方法绑 fake_self)=====
         # 用 T12 单测的 SimpleNamespace 范式,直接调真 _maybe_route_continue:真 strip 校验 +
-        # 真 find_resumable_subagents 扫描(对真 cancelled meta)→ 命中 → 调 inject 回调 +
-        # 返回 True(拦截 submit)。inject 回调本身 UI 副作用(橙色 widget + reminder Turn)由
+        # 真 find_resumable_subagents 扫描(对真 cancelled meta)→ 命中 → 调 refresh 回调 +
+        # 返回 True(拦截 submit)。refresh 回调本身 UI 副作用(橙色 widget + reminder Turn)由
         # T10/T11 单测覆盖;此处只验路由判定+发现+拦截,不重测 UI。
         route_self = _build_route_fake_self(store)
         handled = await BirdApp._maybe_route_continue(route_self, "继续")
         assert handled is True  # "继续"路由拦截(不透传 submit)
-        assert route_self.inject_calls == [1]  # 触发 inject(代表橙色 + reminder mount)
+        # Task 7:force_show=True 被调(代表橙色 + reminder mount)
+        assert route_self.refresh_calls == [True]
         # 对照:非"继续"输入不拦截(回归 strip 严格匹配)
         route_self2 = _build_route_fake_self(store)
         handled_other = await BirdApp._maybe_route_continue(route_self2, "继续分析")
         assert handled_other is False
-        assert route_self2.inject_calls == []
+        assert route_self2.refresh_calls == []
 
         # ===== ④ 续跑闭环:授权假定 → ResumeAgentTool.execute(sub-B, "继续")=====
         # 唯一 mock:SubagentRunner(避免真实 LLM);其余 resume/manager/store/ctrl 全真实

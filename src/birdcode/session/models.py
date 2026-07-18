@@ -124,7 +124,10 @@ class SubagentMeta(BaseModel):
     is_async: bool = Field(False, alias="isAsync")
     model: str = ""
     resolved_model: str | None = Field(None, alias="resolvedModel")
-    status: Literal["launched", "running", "idle", "completed", "error", "cancelled"] = "launched"
+    # lost = 用户按 2/No 永久丢弃(不可续);discover.RESUMABLE_STATUSES 不含 lost → 天然排除。
+    status: Literal[
+        "launched", "running", "idle", "completed", "error", "cancelled", "lost"
+    ] = "launched"
     spawned_at: str = Field("", alias="spawnedAt")
     completed_at: str | None = Field(None, alias="completedAt")
     total_duration_ms: int | None = Field(None, alias="totalDurationMs")

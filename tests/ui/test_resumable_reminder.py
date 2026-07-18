@@ -7,6 +7,7 @@ on_mount 注入接线另用 _inject_resumable_reminder 方法覆盖(轻量集成
 
 from __future__ import annotations
 
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -74,7 +75,11 @@ def test_build_resumable_reminder_truncates_to_exactly_100():
     assert len(desc) == 100
 
 
-# —— 注入接线:_inject_resumable_reminder(轻量集成,未绑定方法 + SimpleNamespace)——
+# —— 注入接线:_inject_resumable_reminder(现薄壳 → _refresh_resume_prompt)——
+# Task 3 后:_inject_resumable_reminder 方法体 = await self._refresh_resume_prompt()。
+# 这里测的是经 _refresh 的端到行为(扫 → _rewrite_reminder 注 Turn → _mount 弹窗),
+# fake 绑真实 _refresh + 依赖(_current_subagents_dir、_rewrite_reminder),_mount 由
+# 调用方注入(noop/capture)。新字段:_shown_agent_ids / _reminder_turn(Task 2 引入)。
 
 
 def _make_store(tmp_path) -> SessionStore:
@@ -105,20 +110,42 @@ def _write_meta_file(store: SessionStore, agent_id: str, status: str, prompt: st
     )
 
 
+def _build_inject_fake_self(
+    store: SessionStore | None, controller: SimpleNamespace, mount_fn
+) -> SimpleNamespace:
+    """fake_self 覆盖 _inject_resumable_reminder → _refresh_resume_prompt 全链路。
+
+    绑真实 _refresh_resume_prompt + 其依赖(_current_subagents_dir、_rewrite_reminder);
+    _mount_resume_prompt 用调用方提供的 mount_fn(noop 或 capture)。
+    """
+    ns = SimpleNamespace(
+        _store=store,
+        _controller=controller,
+        _reminder_turn=None,
+        _dismissal_turn=None,
+        _shown_agent_ids=set(),
+        _lost_agent_ids=set(),
+        query=lambda *a, **k: [],
+        query_one=None,
+    )
+    ns._current_subagents_dir = types.MethodType(BirdApp._current_subagents_dir, ns)
+    ns._rewrite_reminder = types.MethodType(BirdApp._rewrite_reminder, ns)
+    ns._refresh_resume_prompt = types.MethodType(BirdApp._refresh_resume_prompt, ns)
+    ns._mount_resume_prompt = mount_fn
+    return ns
+
+
 @pytest.mark.asyncio
 async def test_inject_resumable_reminder_appends_synthetic_turn(tmp_path):
-    """扫到非终态 meta → 追加合成 Turn 到 controller.history(供首轮 LLM 上下文)。"""
+    """扫到非终态 meta → _refresh → _rewrite_reminder 追加合成 Turn(供首轮 LLM 上下文)。"""
     store = _make_store(tmp_path)
     _write_meta_file(store, "A1", "running", "分析模块")
     controller = SimpleNamespace(history=[])
 
-    async def _noop_mount(_metas):  # T11: _inject 现还会调 _mount_resume_prompt,fake 接住
+    async def _noop_mount(_metas):  # _refresh 还会调 _mount_resume_prompt,fake 接住
         return None
 
-    fake_self = SimpleNamespace(
-        _store=store, _controller=controller, _mount_resume_prompt=_noop_mount,
-        _resume_reminder_injected=False,
-    )
+    fake_self = _build_inject_fake_self(store, controller, _noop_mount)
 
     await BirdApp._inject_resumable_reminder(fake_self)
 
@@ -131,11 +158,16 @@ async def test_inject_resumable_reminder_appends_synthetic_turn(tmp_path):
     text = "".join(b.text for b in msg.content if isinstance(b, TextBlock))
     assert "A1" in text and "分析模块" in text
     assert "<system-reminder>" in text
+    # Task 3:_reminder_turn 指向当前(单条动态)reminder Turn
+    assert fake_self._reminder_turn is turn
 
 
 @pytest.mark.asyncio
 async def test_inject_resumable_reminder_also_mounts_resume_prompt(tmp_path):
-    """T11:扫到非终态 meta → 同时把 metas 传给 _mount_resume_prompt(UI 提示)。"""
+    """扫到非终态 meta → _refresh 同时把 metas 传给 _mount_resume_prompt(UI 提示)。
+
+    首次调用 _shown 为空 → delta = 全量 R → mount 收到 [A1]。
+    """
     store = _make_store(tmp_path)
     _write_meta_file(store, "A1", "running", "分析模块")
     controller = SimpleNamespace(history=[])
@@ -144,37 +176,41 @@ async def test_inject_resumable_reminder_also_mounts_resume_prompt(tmp_path):
     async def _capture_mount(metas):
         mounted.append(metas)
 
-    fake_self = SimpleNamespace(
-        _store=store, _controller=controller, _mount_resume_prompt=_capture_mount,
-        _resume_reminder_injected=False,
-    )
+    fake_self = _build_inject_fake_self(store, controller, _capture_mount)
 
     await BirdApp._inject_resumable_reminder(fake_self)
 
     assert len(controller.history) == 1  # reminder 仍注入
-    assert len(mounted) == 1  # mount 调用一次
+    assert len(mounted) == 1  # mount 调用一次(首次 delta=全量)
     assert mounted[0] and mounted[0][0].agent_id == "A1"
 
 
 @pytest.mark.asyncio
 async def test_inject_resumable_reminder_skips_when_empty(tmp_path):
-    """无可续跑 meta → 不追加任何 Turn(空注入)。"""
+    """无可续跑 meta → _rewrite_reminder([]) 撤回且不重注;mount 不触发(delta 空)。"""
     store = _make_store(tmp_path)  # 无 meta 文件
     controller = SimpleNamespace(history=[])
-    fake_self = SimpleNamespace(
-        _store=store, _controller=controller, _resume_reminder_injected=False,
-    )
+
+    async def _noop_mount(_metas):
+        return None
+
+    fake_self = _build_inject_fake_self(store, controller, _noop_mount)
 
     await BirdApp._inject_resumable_reminder(fake_self)
 
     assert controller.history == []
+    assert fake_self._reminder_turn is None
 
 
 @pytest.mark.asyncio
 async def test_inject_resumable_reminder_no_store_returns_early():
-    """无 store → 早返回(no-op)。"""
+    """无 store → _refresh 早返回(no-op)。"""
     controller = SimpleNamespace(history=[])
-    fake_self = SimpleNamespace(_store=None, _controller=controller)
+
+    async def _noop_mount(_metas):
+        return None
+
+    fake_self = _build_inject_fake_self(None, controller, _noop_mount)
     await BirdApp._inject_resumable_reminder(fake_self)  # 不应抛
     assert controller.history == []
 
@@ -248,11 +284,11 @@ async def test_mount_resume_prompt_best_effort_on_query_failure():
 
 @pytest.mark.asyncio
 async def test_inject_resumable_reminder_dedup_turn_across_repeated_calls(tmp_path):
-    """T12 dedup(1):重复调 _inject_resumable_reminder → reminder Turn 只 append 一次。
+    """Task 3:重复调 _inject → reminder Turn 仍只 1 条(撤旧重注,单条动态不堆积)。
 
-    失败场景(修复前):on_mount 注入一次;用户每次"继续"再触发 _inject → 每次都 append
-    相同 reminder Turn,LLM 上下文累积逐字重复的 <system-reminder> 块。
-    修复后:self._resume_reminder_injected flag 首次置 True,后续调用跳过 append。
+    旧逻辑靠 _resume_reminder_injected flag(T12);新逻辑靠 _rewrite_reminder 撤旧重注,
+    净效果仍是 history 恒为 1 条。mount:首次 _shown 空 → delta=全量 → mount;后续
+    _shown 已含 A1 → delta 空 → 不再 mount(差集语义,Task 3 新行为)。
     """
     store = _make_store(tmp_path)
     _write_meta_file(store, "A1", "running", "分析模块")
@@ -262,21 +298,17 @@ async def test_inject_resumable_reminder_dedup_turn_across_repeated_calls(tmp_pa
     async def _capture_mount(_metas):
         mount_calls.append(_metas)
 
-    fake_self = SimpleNamespace(
-        _store=store, _controller=controller, _mount_resume_prompt=_capture_mount,
-        _resume_reminder_injected=False,
-    )
+    fake_self = _build_inject_fake_self(store, controller, _capture_mount)
 
     await BirdApp._inject_resumable_reminder(fake_self)
     await BirdApp._inject_resumable_reminder(fake_self)
     await BirdApp._inject_resumable_reminder(fake_self)
 
-    # reminder Turn 不累积:3 次调用 → history 仍只 1 条
+    # reminder Turn 不累积:3 次调用 → history 仍只 1 条(_rewrite_reminder 撤旧重注)
     assert len(controller.history) == 1
-    # flag 置位(后续不再 append)
-    assert fake_self._resume_reminder_injected is True
-    # _mount_resume_prompt 仍每次被调(widget 去重在其内部处理)
-    assert len(mount_calls) == 3
+    assert fake_self._reminder_turn is controller.history[0]
+    # mount:首次 delta=全量 → mount;后续 delta 空 → 不 mount → 共 1 次
+    assert len(mount_calls) == 1
 
 
 @pytest.mark.asyncio
