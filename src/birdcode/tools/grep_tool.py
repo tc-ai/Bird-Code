@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from birdcode.tools.base import Tool
+from birdcode.tools.base import Tool, ToolOutput
 
 
 def _which_rg() -> str | None:
@@ -29,7 +29,7 @@ class _GrepInput(BaseModel):
     )
     line_number: bool = Field(default=False, description="content 模式下带行号。")
     ignore_case: bool = Field(default=False, description="忽略大小写。")
-    head_limit: int = Field(default=250, description="输出行数上限(截断)。")
+    head_limit: int = Field(default=1000, description="输出行数上限(截断,超阈落盘全量)。")
 
 
 class GrepTool(Tool):
@@ -65,7 +65,7 @@ class GrepTool(Tool):
         output_mode: str = "files_with_matches",
         line_number: bool = False,
         ignore_case: bool = False,
-        head_limit: int = 250,
+        head_limit: int = 1000,
     ) -> str:
         if _which_rg() is None:
             return (
@@ -110,10 +110,14 @@ class GrepTool(Tool):
             )
         lines = out.splitlines()
         if len(lines) > head_limit:
+            # 超阈:摘要(前 N 行 + 计数)给 LLM + 全量给 executor 落盘 sidecar,
+            # 模型可 read_file(offset/limit) 分页读尾部(尾部不再丢失)。
             kept = lines[:head_limit]
-            return (
-                "\n".join(kept) + f"\n... [已截断 — 共 {len(lines)} 行,显示前 {head_limit};"
-                "用更精确的 pattern 或 glob 缩小范围] ..."
+            return ToolOutput(
+                text="\n".join(kept)
+                + f"\n... [已截断 — 共 {len(lines)} 行,显示前 {head_limit};"
+                "用更精确的 pattern 或 glob 缩小范围] ...",
+                full="\n".join(lines),
             )
         return "\n".join(lines).rstrip()
 

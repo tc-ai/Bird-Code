@@ -154,9 +154,11 @@ class ToolExecutor:
             return ToolResult(tu.id, ok=False, error_message=str(exc))
 
         tool_use_result: dict[str, Any] | None = None
+        full_body: str | None = None  # 行数受限工具(grep/glob)超阈时的完整原文(供落盘)
         if isinstance(result, ToolOutput):
             output = result.text
             tool_use_result = result.tool_use_result
+            full_body = result.full
         else:
             output = result
 
@@ -170,31 +172,49 @@ class ToolExecutor:
         full_output = ""
         persisted_path: str | None = None
         persisted_size: int | None = None
-        # 默认:LLM 拿 20000 截断版(无 sink / 落盘失败均走此,恢复旧行为)
-        llm_content = self._truncate(output, _DEFAULT_LLM_CHAR_LIMIT)[1]
-        if self._output_sink is not None:
-            # per-tool 阈值(tool.max_result_chars);math.inf → 永不落盘(read_file,
-            # 避免读落盘文件→又超阈→循环)。仿 CC maxResultSizeChars。
-            if len(output) > tool.max_result_chars:
-                # sink.persist 抛非 OSError 异常时,旧代码会让异常逃过 ToolError except、
-                # 被 execute_batch 的 except Exception 捕获 → 成功工具翻 ok=False。包 try/except:
-                # 失败 → info=None + log.warning,llm_content 保持 LLM 截断版(20000)。不抛。
+        if full_body is not None:
+            # 行数受限工具(grep/glob)超阈:text=前 N 行摘要(给 LLM)+ full=全量落盘 sidecar,
+            # 模型可 read_file(offset/limit) 分页读尾部。兼顾"好摘要(含计数)"与"不丢尾部"。
+            llm_content = output  # 摘要(前 N 行 + 计数)
+            if self._output_sink is not None:
                 try:
-                    info = await self._output_sink.persist(tu.id, output)
-                except Exception:  # noqa: BLE001 - 任何 persist 异常都降级,不杀工具
-                    log.warning("output_sink.persist 失败,降级 inline", exc_info=True)
+                    info = await self._output_sink.persist(tu.id, full_body)
+                except Exception:  # noqa: BLE001 - persist 失败降级:只给摘要,无路径
+                    log.warning("output_sink.persist(full) 失败,降级仅摘要", exc_info=True)
                     info = None
                 if info is not None:
-                    full_output = output
+                    full_output = full_body
                     persisted_path = info.path
                     persisted_size = info.size
-                    llm_content = info.llm_content  # 超阈:给 LLM 占位
-                # 落盘失败(info=None):llm_content 保持 20000 截断版(默认值)
-            else:
-                # 有 sink 不超阈:给 LLM 完整原文(不截断、不落盘)。
-                # 设计决策:不超阈没落盘,LLM 必须看全量(read_file 取不到落盘文件)。
-                llm_content = output
-        # 无 sink:llm_content 保持 20000 截断版(默认值,恢复旧行为)
+                    llm_content = (
+                        output + f"\n... [完整结果已存盘: {info.path}"
+                        " — 用 read_file(offset/limit) 分段读取尾部] ..."
+                    )
+                # 落盘失败 / 无 sink:llm_content 保持纯摘要(尾部不可恢复,但至少有计数摘要)
+        else:
+            # 原有 char 阈值三轨(bash/read_file 等):per-tool max_result_chars;
+            # math.inf → 永不落盘(read_file,避免读落盘文件→又超阈→循环)。仿 CC maxResultSizeChars。
+            llm_content = self._truncate(output, _DEFAULT_LLM_CHAR_LIMIT)[1]
+            if self._output_sink is not None:
+                if len(output) > tool.max_result_chars:
+                    # persist 抛非 OSError 异常会被 execute_batch 的 except 捕获 → 翻 ok=False。
+                    # 包 try/except:失败 → info=None + log.warning,llm_content 保持截断版。不抛。
+                    try:
+                        info = await self._output_sink.persist(tu.id, output)
+                    except Exception:  # noqa: BLE001 - 任何 persist 异常都降级,不杀工具
+                        log.warning("output_sink.persist 失败,降级 inline", exc_info=True)
+                        info = None
+                    if info is not None:
+                        full_output = output
+                        persisted_path = info.path
+                        persisted_size = info.size
+                        llm_content = info.llm_content  # 超阈:给 LLM 占位
+                    # 落盘失败(info=None):llm_content 保持 20000 截断版(默认值)
+                else:
+                    # 有 sink 不超阈:给 LLM 完整原文(不截断、不落盘)。
+                    # 设计决策:不超阈没落盘,LLM 必须看全量(read_file 取不到落盘文件)。
+                    llm_content = output
+            # 无 sink:llm_content 保持 20000 截断版(默认值,恢复旧行为)
         diff = self._take_diff(tu.name)  # 取走该工具的侧信道(若有)
         return ToolResult(
             tu.id,

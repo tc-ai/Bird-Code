@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from birdcode.tools.base import ToolOutput
 from birdcode.tools.glob_tool import GlobTool
 from birdcode.tools.grep_tool import GrepTool
 from birdcode.tools.read_tool import ReadTool
@@ -15,7 +16,9 @@ _HAS_RG = shutil.which("rg") is not None
 
 async def test_glob_finds_python_sources() -> None:
     out = await GlobTool().execute(pattern="src/**/*.py", path=str(_REPO_ROOT))
-    files = [ln for ln in out.splitlines() if ln.strip()]
+    # 仓库 src .py >100 条 → glob 超阈返回 ToolOutput(text=摘要, full=全量);取 full 验全量
+    text = out.full if isinstance(out, ToolOutput) else out
+    files = [ln for ln in text.splitlines() if ln.strip()]
     assert any("tools" in f for f in files)
     assert any("glob_tool.py" in f for f in files)
 

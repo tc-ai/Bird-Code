@@ -1,5 +1,5 @@
 # src/birdcode/tools/glob_tool.py
-"""Glob 工具:按 glob 模式查找文件路径,按 mtime 倒序,限 100 条。"""
+"""Glob 工具:按 glob 模式查找文件路径,按 mtime 倒序,限 600 条(超阈落盘全量)。"""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from birdcode.tools.base import Tool
+from birdcode.tools.base import Tool, ToolOutput
 
-_GLOB_LIMIT = 100
+_GLOB_LIMIT = 600
 _WORKTREE_SKIP = (".birdcode", "worktrees")
 
 
@@ -81,14 +81,21 @@ class GlobTool(Tool):
         capped = matched[:_GLOB_LIMIT]
         # 相对 path 给出更短可读;path 为 None 时相对 cwd
         base = root
-        lines = [str(p.relative_to(base)) if _is_relative(p, base) else str(p) for p in capped]
-        body = "\n".join(lines)
+        cap_lines = [str(p.relative_to(base)) if _is_relative(p, base) else str(p) for p in capped]
+        cap_body = "\n".join(cap_lines)
         if len(matched) > _GLOB_LIMIT:
-            body += (
-                f"\n... [已截断 — 共 {len(matched)} 条,限 {_GLOB_LIMIT};"
-                "用更具体的 pattern 缩小范围] ..."
+            # 超阈:摘要(前 100 条 + 计数)给 LLM + 全量给 executor 落盘 sidecar,
+            # 模型可 read_file(offset/limit) 分页读尾部(尾部不再丢失)。
+            all_lines = [
+                str(p.relative_to(base)) if _is_relative(p, base) else str(p) for p in matched
+            ]
+            return ToolOutput(
+                text=cap_body
+                + f"\n... [已截断 — 共 {len(matched)} 条,限 {_GLOB_LIMIT};"
+                "用更具体的 pattern 缩小范围] ...",
+                full="\n".join(all_lines),
             )
-        return body
+        return cap_body
 
 
 def _is_relative(p: Path, base: Path) -> bool:

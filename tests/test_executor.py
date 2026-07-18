@@ -561,6 +561,74 @@ async def test_over_threshold_persists_and_llm_content_is_placeholder():
     assert res[0].truncated is True  # UI 也截断(char_limit=50)
 
 
+# ---- ToolOutput.full:行数受限工具(grep/glob)超阈 → 落盘全量 + 摘要 + 路径 ----
+
+
+class _CappedInput(BaseModel):
+    text: str
+
+
+class _CappedTool(Tool):
+    """模拟 grep/glob 超阈:返回 ToolOutput(text=摘要, full=全量)。"""
+
+    name = "capped"
+    description = "capped"
+    parameters = _CappedInput
+    kind = "read"
+    parallel_safe = True
+
+    async def execute(self, **args):
+        from birdcode.tools.base import ToolOutput
+
+        body = str(args["text"])
+        lines = body.splitlines()
+        summary = "\n".join(lines[:3]) + f"\n... [共 {len(lines)} 行,显示前 3] ..."
+        return ToolOutput(text=summary, full=body)
+
+
+@pytest.mark.asyncio
+async def test_tooloutput_full_persists_full_and_inline_is_summary_plus_path():
+    """ToolOutput.full 非空 → executor 落盘 full、inline=摘要+路径、full_output=full。
+
+    grep/glob 超阈走此路径:模型看到前 N 行摘要 + "完整结果已存盘:<path>",可 read_file 分页读尾部。
+    """
+    from birdcode.tools.registry import ToolRegistry
+
+    sink = _RecordingSink()
+    reg = ToolRegistry()
+    reg.register(_CappedTool())
+    ex = ToolExecutor(reg, output_sink=sink)
+    body = "\n".join(f"line{i}" for i in range(10))
+    res = await ex.execute_batch([ToolUseBlock(id="c1", name="capped", input={"text": body})])
+    r = res[0]
+    # 落盘的是 full(全量),不是摘要
+    assert sink.calls and sink.calls[0] == ("c1", body)
+    assert r.full_output == body
+    assert r.persisted_path == "/p/c1.txt"
+    # inline = 摘要 + 路径提示(尾部不在 inline,在落盘文件)
+    assert "共 10 行" in r.llm_content
+    assert "/p/c1.txt" in r.llm_content
+    assert "read_file" in r.llm_content
+    assert "line9" not in r.llm_content
+
+
+@pytest.mark.asyncio
+async def test_tooloutput_full_no_sink_degrades_to_summary_only():
+    """无 sink → ToolOutput.full 无法落盘,llm_content 降级为纯摘要(尾部不可恢复,但有计数)。"""
+    from birdcode.tools.registry import ToolRegistry
+
+    reg = ToolRegistry()
+    reg.register(_CappedTool())
+    ex = ToolExecutor(reg, output_sink=None)
+    body = "\n".join(f"line{i}" for i in range(10))
+    res = await ex.execute_batch([ToolUseBlock(id="c1", name="capped", input={"text": body})])
+    r = res[0]
+    assert r.persisted_path is None
+    assert r.full_output == ""  # 没落盘
+    assert "共 10 行" in r.llm_content  # 纯摘要保留
+    assert "/p/" not in r.llm_content  # 无路径
+
+
 @pytest.mark.asyncio
 async def test_output_still_truncated_for_ui_when_persisted():
     """超阈落盘后:UI 的 output 仍走 head/tail 截断(UI 阈值 2000);三轨分离。"""

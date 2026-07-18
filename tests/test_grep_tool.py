@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from birdcode.tools.base import ToolOutput
 from birdcode.tools.grep_tool import GrepTool
 
 _HAS_RG = shutil.which("rg") is not None
@@ -124,8 +125,12 @@ async def test_grep_head_limit_truncates(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr("birdcode.tools.grep_tool._which_rg", _which_ok)
     monkeypatch.setattr(GrepTool, "_run_rg", staticmethod(_fake_run))
     out = await GrepTool().execute(pattern="match", path=".", head_limit=10)
-    assert "已截断" in out
-    assert "共 300 行" in out
+    # 超阈 → ToolOutput(text=摘要, full=全量):摘要给 LLM,全量供 executor 落盘 sidecar
+    assert isinstance(out, ToolOutput)
+    assert "已截断" in out.text
+    assert "共 300 行" in out.text
+    assert "file299.py" in out.full  # full 含全部 300 行(尾部不丢)
+    assert out.full.count("\n") == 299
 
 
 def test_grep_description_and_name() -> None:

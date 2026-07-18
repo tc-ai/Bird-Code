@@ -45,11 +45,13 @@ class ToolOutput:
     """工具的结构化返回(扩展 execute 的 str):text 进三轨,tool_use_result 进结构化真相层。
 
     Agent 工具首个实例。现有工具继续返回 str(向后兼容,str 仍是合法返回)。
-    persisted_* 暂不引入(YAGNI,Agent 工具不用;未来大输出外存再加)。
+    full(可选):行数受限工具(grep/glob)超阈时填——text=前 N 行摘要(给 LLM),
+    full=完整原文(executor 落盘 sidecar,模型可 read_file 分页读尾部)。None=未超阈/不适用。
     """
 
     text: str
     tool_use_result: dict[str, Any] | None = None
+    full: str | None = None
 
 
 class Tool(ABC):

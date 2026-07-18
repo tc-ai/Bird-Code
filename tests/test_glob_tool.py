@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from birdcode.tools.base import ToolOutput
 from birdcode.tools.glob_tool import GlobTool
 
 
@@ -48,14 +49,20 @@ async def test_glob_no_match_returns_error_hint(sample_tree: Path) -> None:
     assert "<hint>" in out and "**/*" in out  # 引导放宽 pattern
 
 
-async def test_glob_caps_at_100(tmp_path: Path) -> None:
-    for i in range(150):
+async def test_glob_caps_at_600(tmp_path: Path) -> None:
+    for i in range(700):
         (tmp_path / f"f{i:03d}.py").write_text("x", encoding="utf-8")
     out = await GlobTool().execute(pattern="*.py", path=str(tmp_path))
+    # 超阈(>600)→ ToolOutput(text=摘要, full=全量):摘要给 LLM,全量供 executor 落盘 sidecar
+    assert isinstance(out, ToolOutput)
     # 仅统计真实文件路径行(排除截断提示行)
-    path_lines = [ln for ln in out.splitlines() if ln.strip() and not ln.startswith("...")]
-    assert len(path_lines) == 100
-    assert "已截断" in out or "限 100" in out  # 超限提示
+    path_lines = [
+        ln for ln in out.text.splitlines() if ln.strip() and not ln.startswith("...")
+    ]
+    assert len(path_lines) == 600
+    assert "已截断" in out.text or "限 600" in out.text  # 超限提示
+    assert "f699.py" in out.full  # full 含全部 700 条(尾部不丢)
+    assert out.full.count("\n") == 699
 
 
 def test_glob_description_and_name() -> None:
