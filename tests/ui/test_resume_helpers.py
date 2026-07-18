@@ -62,17 +62,3 @@ async def test_rewrite_reminder_empty_withdraws(tmp_path: Path) -> None:
     await BirdApp._rewrite_reminder(fake, [])  # type: ignore[arg-type]
     assert controller.history == []
     assert fake._reminder_turn is None
-
-
-async def test_rewrite_dismissal_lists_lost(tmp_path: Path) -> None:
-    controller = TurnController.__new__(TurnController)
-    controller.history = []  # type: ignore[attr-defined]
-    fake = SimpleNamespace(
-        _controller=controller, _dismissal_turn=None,
-        _lost_agent_ids={"sub-1", "sub-2"},
-    )
-    await BirdApp._rewrite_dismissal(fake)  # type: ignore[arg-type]
-    assert fake._dismissal_turn is not None
-    text = fake._dismissal_turn.messages[0].content[0].text  # type: ignore[attr-defined]
-    assert "agent_id=sub-1" in text and "agent_id=sub-2" in text
-    assert "resume_agent" in text  # 反信号点名工具

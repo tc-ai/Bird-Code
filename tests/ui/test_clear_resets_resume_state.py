@@ -14,13 +14,14 @@ from types import SimpleNamespace
 
 
 def test_clear_resets_resume_state() -> None:
-    """占位:确认 4 个字段命名 + clear 时应被重置的语义(源码级断言在 Step 3 改动)。"""
+    """占位:确认 resume 状态字段命名 + clear 时应被重置的语义。
+
+    丢弃改走真实 user 消息(submit,落盘常驻),故 resume 相关内存态只剩
+    _shown_agent_ids / _reminder_turn(都在 /clear 重置)。
+    """
     fake = SimpleNamespace(
         _shown_agent_ids={"sub-1"},
         _reminder_turn=object(),
-        _dismissal_turn=object(),
-        _lost_agent_ids={"sub-1"},
     )
     # 改前:状态非空(模拟"使用过 resume 提示的会话")
     assert fake._shown_agent_ids == {"sub-1"}
-    assert fake._lost_agent_ids == {"sub-1"}

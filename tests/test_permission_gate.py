@@ -442,6 +442,26 @@ async def test_fork_async_rejects_write_in_default_mode_without_modal(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_resume_session_rule_preauth_skips_hitl(gate_factory):
+    """ResumePrompt Yes 预授权:add_session("Resume(*)") → resume_agent 走 L3 放行,不再弹 L5。
+
+    消除"弹两次":用户在 ResumePrompt 已明示续跑,resume_agent 不该紧接着又过权限门 HITL
+    (其 docstring 亦写「本工具假定已授权」)。规则串与 gate 自身 _add_session_by_category
+    对 resume_agent 产出的 "Resume(*)" 一致(蛇形桥 resume→resume_agent)。
+    """
+    resume = _tool("resume_agent", "write")
+    # 无预授权 + HITL=reject → 走到 L5 → deny(证明原本会弹门)
+    g_no = gate_factory(mode="default", modal="reject")
+    v_no = await g_no.check(resume, {"agent_id": "sub-1", "direction": "继续"})
+    assert v_no.action == "deny" and v_no.layer == "L5"
+    # 预授权 → L3 放行,不弹门(即便 HITL 设成 reject)
+    g_yes = gate_factory(mode="default", modal="reject")
+    g_yes.add_session("Resume(*)", "allow")
+    v_yes = await g_yes.check(resume, {"agent_id": "sub-1", "direction": "继续"})
+    assert v_yes.action == "allow" and v_yes.layer == "L3"
+
+
+@pytest.mark.asyncio
 async def test_fork_async_allows_read_same_as_parent(gate_factory, tmp_path):
     """fork_async:L1-L4 与父完全一致 → 读类照常 allow(读不触 L5,
     即便异步 L5 会拒)。project_root 内读取走 read-default 放行。"""

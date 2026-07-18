@@ -297,13 +297,11 @@ class BirdApp(App[None]):
         self._follow_timer: Timer | None = None  # 生成期间的「钉底」定时器
         self._bg_tasks: set[asyncio.Task[None]] = set()  # 持有后台轮次任务引用 + 回收异常
         # resume 提示状态:_shown=已展示过的可续 agent_id(差集基准,防会话内重复弹);
-        # _reminder_turn=当前 reminder Turn(单条动态,refresh 撤旧重注,内容=全量可续清单);
-        # _dismissal_turn=当前反信号 Turn(单条动态,内容=累积已 lost 的 id);_lost=本会话已丢 id。
-        # /clear 重置(见 clear_conversation)。lost 持久化在 meta,跨会话保留。
+        # _reminder_turn=当前 reminder Turn(单条动态,refresh 撤旧重注,内容=全量可续清单)。
+        # /clear 重置(见 clear_conversation)。丢弃改走真实 user 消息(submit,落盘常驻),
+        # 不再有内存态反信号 Turn。lost 持久化在 meta,跨会话保留。
         self._shown_agent_ids: set[str] = set()
         self._reminder_turn: ConversationTurn | None = None
-        self._dismissal_turn: ConversationTurn | None = None
-        self._lost_agent_ids: set[str] = set()
 
     @property
     def controller(self) -> TurnController:
@@ -657,8 +655,8 @@ class BirdApp(App[None]):
     async def _rewrite_reminder(self, metas: list[SubagentMeta]) -> None:
         """撤回旧 reminder Turn;metas 非空则重注一条含全量可续清单的(单条动态)。
 
-        撤回 = 从 controller.history 移除旧 Turn(只影响未来 LLM 轮次;已送出的无法撤回,
-        由 _rewrite_dismissal 的反信号兜底)。空 metas → 仅撤回不重注。
+        撤回 = 从 controller.history 移除旧 Turn(只影响未来 LLM 轮次;已送出的无法撤回)。
+        空 metas → 仅撤回不重注。
         """
         if self._controller is None:
             return
@@ -676,34 +674,6 @@ class BirdApp(App[None]):
         turn = Turn(messages=[msg])
         self._controller.history.append(turn)
         self._reminder_turn = turn
-
-    async def _rewrite_dismissal(self) -> None:
-        """撤回旧反信号 Turn;_lost_agent_ids 非空则重注一条含全量已丢 id 的(单条动态)。
-
-        反信号是软约束(system-reminder 提示,非技术强制),叠加 resume_agent 经权限门
-        (executor 对 write 工具查 gate)后实践遵从度高。
-        """
-        if self._controller is None:
-            return
-        from birdcode.conversation import Turn
-
-        if self._dismissal_turn is not None:
-            with contextlib.suppress(ValueError):
-                self._controller.history.remove(self._dismissal_turn)
-            self._dismissal_turn = None
-        if not self._lost_agent_ids:
-            return
-        aids = ", ".join(f"agent_id={a}" for a in sorted(self._lost_agent_ids))
-        text = (
-            "<system-reminder>\n"
-            "用户已选择永久丢弃以下子 agent 任务，"
-            f"请勿主动调用 resume_agent 续跑它们：{aids}\n"
-            "</system-reminder>"
-        )
-        msg = Message(role="user", content=[TextBlock(text=text)], synthetic=True)
-        turn = Turn(messages=[msg])
-        self._controller.history.append(turn)
-        self._dismissal_turn = turn
 
     async def _refresh_resume_prompt(self, *, force_show: bool = False) -> None:
         """统一入口:扫可续跑 R → 重写 reminder(全量) + 按需 mount 弹窗。
@@ -741,14 +711,16 @@ class BirdApp(App[None]):
         self._shown_agent_ids |= ids
 
     def _refocus_main_input(self) -> None:
-        """best-effort 把焦点回主输入(ResumePrompt 曾持焦点,卸载后用户继续打字)。
+        """best-effort 恢复主输入可见 + 焦点(ResumePrompt 期间隐藏过,决策后恢复)。
 
-        ResumePrompt mount 时取焦(1/2 键可用);用户按下 1/2 后 widget self.remove(),
-        焦点需显式回归 #input——Textual 移除已聚焦 widget 时的落点不保证是主输入。
-        对齐 ChoicePrompt 的 ask_user finally(main_input.focus())。
+        ResumePrompt mount 时隐藏 #input + 取焦弹窗(强制先做 1/2 决策);用户按下 1/2 后
+        widget self.remove(),这里恢复 #input 可见 + 焦点。对齐 ChoicePrompt ask_user finally。
+        display=True 须在 focus 前:隐藏(display=False)的 widget 不可聚焦。
         """
         try:
-            self.query_one("#input", InputArea).focus()
+            inp = self.query_one("#input", InputArea)
+            inp.display = True
+            inp.focus()
         except Exception:  # noqa: BLE001 - 无 #input(测试/非 BirdApp)→ 跳过
             log.debug("refocus #input 失败", exc_info=True)
 
@@ -757,29 +729,64 @@ class BirdApp(App[None]):
 
         主 agent 见 _reminder_turn 清单后调 resume_agent 逐个续跑。
         """
+        # 用户已在 ResumePrompt 明示续跑 → 预授权 resume_agent 本会话:免紧接着 resume_agent
+        # 又弹权限门("弹两次"),并消除 ResumePrompt 的 2=丢弃 与权限门的 2=放行 之间的数字键
+        # 极性冲突。对齐 ResumeAgentTool docstring「本工具假定已授权」。未经本路径的 spontaneous
+        # 续跑(主 agent 自行调 resume_agent)仍走权限门 L5。
+        if self._gate is not None:
+            try:
+                self._gate.add_session("Resume(*)", "allow")
+            except Exception:  # noqa: BLE001 - 预授权失败不阻断续跑,仅降级回 HITL
+                log.debug("resume 预授权加 session 规则失败", exc_info=True)
         await self.controller.submit("继续")
         self._refocus_main_input()
 
     async def _on_resume_dismissed(self, aids: list[str]) -> None:
-        """用户按 2/No(整批):每个 agent 标 lost + 重写 reminder(保留其它可续)+ 反信号。
+        """用户按 2/No(整批):标 lost(硬) + 写【真实 user 消息】告知模型取消。
 
-        - 标 lost:meta 落盘(跨会话不再被 discover 扫到)+ _lost_agent_ids 累积(反信号源)。
-        - reminder 重写:重扫 R(已不含刚 lost 的)→ 撤旧重注,未忽略的其它可续 agent 保留。
-        - 反信号重写:撤旧重注,含全量 _lost_agent_ids(软约束:模型勿主动续跑)。
+        真实 user 消息(非 system-reminder):store.append 落盘 jsonl + history.append 进历史
+        (常驻、跨会话保留)——相当于用户亲自留话"这些 agent 无需续跑"。但【不触发 LLM 轮次】
+        (不 submit):免为"丢弃确认"独烧一轮;消息悬空在历史尾部,模型下次轮次连同新输入一起
+        收到(两条连续 user)。叠加 meta=lost 硬保证(discover 排除 + resume_subagent lost 守卫)
+        双保险。(旧 synthetic 反信号只在内存、不跨会话、易被忽略,本设计直击这些痛点。)
         """
+        if self._store is None or self._controller is None:
+            return
+        from birdcode.session import paths
+        from birdcode.session.subagent_meta import read_subagent_meta
+
+        # 1) 硬:meta 标 lost + 收集任务描述(已 lost 但 prompt/description 仍在)
+        items: list[str] = []
         for aid in aids:
             self._mark_lost_agent(aid)
-            self._lost_agent_ids.add(aid)
+            mp = paths.subagent_meta_path(
+                self._store.root,
+                self._store.ctx.session_id,
+                self._store.project_root,
+                aid,
+                worktree_name=self._store.worktree_name,
+            )
+            m = read_subagent_meta(mp)
+            desc = (m.prompt or m.description or "(无描述)")[:100] if m is not None else "(无描述)"
+            items.append(f"- [{aid}] {desc}")
+        # 2) 更新 reminder 清单(去掉已 lost,保留其它可续)
         from birdcode.agents.discover import find_resumable_subagents
 
         subagents_dir = self._current_subagents_dir()
-        metas = (
-            find_resumable_subagents(subagents_dir)
-            if subagents_dir is not None
-            else []
-        )
+        metas = find_resumable_subagents(subagents_dir) if subagents_dir is not None else []
         await self._rewrite_reminder(metas)
-        await self._rewrite_dismissal()
+        # 3) 真实 user 消息:落盘 jsonl + 进 history(常驻、跨会话),不触发 LLM 轮次。
+        #    不 submit → 不烧一轮;消息悬空,模型下次轮次连同新输入一起收到。
+        body = "\n".join(items)
+        notice = (
+            "我已取消以下子 agent 任务，无需再续跑——请不要 resume_agent 续跑它们，"
+            f"也不要重新发起：\n{body}"
+        )
+        from birdcode.conversation import Turn
+
+        msg = Message(role="user", content=[TextBlock(text=notice)])
+        await self._store.append(msg)
+        self._controller.history.append(Turn(messages=[msg]))
         self._refocus_main_input()
 
     async def _on_interrupt_scan(self) -> None:
@@ -820,6 +827,12 @@ class BirdApp(App[None]):
             await self.query_one("#scroll").mount(prompt)
             # 1/2 键需焦点才触发;对齐 PermissionPrompt/ChoicePrompt(mount 后 focus)
             prompt.focus()
+            # 隐藏主输入:弹窗期间强制先做 1/2 决策,消除"焦点在弹窗但输入框可见"的歧义
+            # (对齐 ChoicePrompt 隐藏 #input)。决策后 _refocus_main_input 恢复。
+            try:
+                self.query_one("#input", InputArea).display = False
+            except Exception:  # noqa: BLE001 - 无 #input(测试/非 BirdApp)→ 跳过
+                pass
         except Exception:  # noqa: BLE001 - 挂载失败不影响 reminder 注入或 resume
             log.debug("mount resume prompt failed", exc_info=True)
 
@@ -1276,11 +1289,11 @@ class BirdApp(App[None]):
         """
         self.controller.abort()
         # 取消上一会话残留的后台任务(resume 丢弃/中断扫描/submit 轮次),免其跨 /clear 操作
-        # 新会话——典型泄漏:_on_resume_dismissed 把旧 aids 累积进【已清空】的 _lost_agent_ids、
-        # 再把反信号 Turn 注入新会话历史,使新会话 LLM 见到针对不存在 agent 的丢弃提示。
+        # 新会话——典型泄漏:旧会话的 _on_resume_dismissed 经 store.append/history.append 把
+        # "丢弃某 agent"的 user 消息写进新会话,使新会话 LLM 见到针对不存在 agent 的丢弃提示。
         # _reap_bg_task 兜底回收 CancelledError(task.cancelled() 即早退)。须在 reopen 与下方
         # 首个 await(_close_markdown)之前:cancel 早于任何让出事件循环的时机,被取消的任务若
-        # 尚未首跑则不再执行其函数体,若已停在首个 await 则不再继续 rewrite。
+        # 尚未首跑则不再执行其函数体,若已停在首个 await 则不再继续 submit。
         for task in list(self._bg_tasks):
             task.cancel()
         self._bg_tasks.clear()
@@ -1289,16 +1302,19 @@ class BirdApp(App[None]):
         for w in list(scroll.children):
             if w.id != "banner":
                 w.remove()
+        # 弹窗若在(ResumePrompt 隐藏过 #input)→ 恢复主输入可见,免 /clear 后打不了字。
+        try:
+            self.query_one("#input", InputArea).display = True
+        except Exception:  # noqa: BLE001 - 无 #input(测试)→ 跳过
+            pass
         self._tools.clear()
         self._diff_pending.clear()
         self._current_turn = None
         self._thinking_round = 0  # 重置思考轮次(/clear 开新会话)
-        # 新会话恢复 resume 提示能力:_shown/lost 清空(差集基准重置),
-        # reminder/dismissal Turn 撤回(None,旧 Turn 已随 history.clear() 去除)。
+        # 新会话恢复 resume 提示能力:_shown 清空(差集基准重置),
+        # reminder Turn 撤回(None,旧 Turn 已随 history.clear() 去除)。
         self._shown_agent_ids.clear()
         self._reminder_turn = None
-        self._dismissal_turn = None
-        self._lost_agent_ids.clear()
         self.controller.history.clear()
         self.usage = None
         if self._store is None:

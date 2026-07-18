@@ -177,3 +177,59 @@ async def test_action_confirm_does_not_block_pump_on_long_confirmed():
 def test_resume_prompt_action_confirm_method_exists():
     """action_confirm 方法存在(实际按键行为见上方 async 测试)。"""
     assert callable(getattr(ResumePrompt, "action_confirm", None))
+
+
+@pytest.mark.asyncio
+async def test_enter_default_highlights_yes_and_confirms():
+    """enter 提交当前 ▶ 高亮;默认 sel=0(Yes)→ action_confirm(对齐 PermissionPrompt)。
+
+    防 review Bug A:旧 ResumePrompt 无 ↑↓/enter,只认 1/2,与另两套菜单交互不一致。
+    """
+    async with _GateApp().run_test(size=(80, 24)) as pilot:
+        prompt = ResumePrompt([("sub-1", "分析鉴权")])
+        await pilot.app.query_one("#scroll").mount(prompt)
+        await pilot.pause()
+        prompt.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert pilot.app.confirmed_calls == 1
+        assert pilot.app.dismissed_calls == []
+
+
+@pytest.mark.asyncio
+async def test_down_then_enter_ignores():
+    """↓ 移光标到 No(sel=1)→ enter → action_ignore(整批 ids)。"""
+    async with _GateApp().run_test(size=(80, 24)) as pilot:
+        prompt = ResumePrompt([("sub-1", "分析"), ("sub-2", "改测试")])
+        await pilot.app.query_one("#scroll").mount(prompt)
+        await pilot.pause()
+        prompt.focus()
+        await pilot.press("down")
+        await pilot.pause()
+        assert prompt._sel == 1  # noqa: SLF001 - 光标移到 No
+        await pilot.press("enter")
+        await pilot.pause()
+        assert pilot.app.confirmed_calls == 0
+        assert pilot.app.dismissed_calls == [["sub-1", "sub-2"]]
+
+
+@pytest.mark.asyncio
+async def test_up_down_move_cursor_without_deciding():
+    """↑↓ 在 Yes/No 间循环移动光标(回绕),不触发任何决策。"""
+    async with _GateApp().run_test(size=(80, 24)) as pilot:
+        prompt = ResumePrompt([("sub-1", "分析")])
+        await pilot.app.query_one("#scroll").mount(prompt)
+        await pilot.pause()
+        prompt.focus()
+        assert prompt._sel == 0  # noqa: SLF001
+        await pilot.press("down")
+        await pilot.pause()
+        assert prompt._sel == 1  # noqa: SLF001
+        await pilot.press("down")  # 回绕到 Yes
+        await pilot.pause()
+        assert prompt._sel == 0  # noqa: SLF001
+        await pilot.press("up")  # 回绕到 No
+        await pilot.pause()
+        assert prompt._sel == 1  # noqa: SLF001
+        assert pilot.app.confirmed_calls == 0
+        assert pilot.app.dismissed_calls == []

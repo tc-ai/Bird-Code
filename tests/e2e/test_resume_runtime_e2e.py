@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from birdcode.agent.mock_provider import MockProvider
+from birdcode.blocks import TextBlock
 from birdcode.session.models import SessionContext, SubagentMeta
 from birdcode.session.paths import subagent_meta_path
 from birdcode.session.store import SessionStore
@@ -148,12 +149,12 @@ async def test_esc_interrupt_plain_tool_no_prompt(tmp_path: Path) -> None:
 # ---- 用例 3:按 2/No → 整批 lost + reminder 重写 + 反信号;重启不再弹 ----
 
 
-async def test_press_2_no_marks_lost_and_persists(tmp_path: Path) -> None:
-    """按 2/No → 整批 meta=lost;reminder 撤回(无可续);反信号含整批;重启不再弹。
+async def test_press_2_no_marks_lost_and_records_message(tmp_path: Path) -> None:
+    """按 2/No(B) → 整批 meta=lost(硬) + reminder 撤回 + 写真实 user 消息(落盘 jsonl + 进历史),
+    不触发 LLM 轮次;重启不再弹。
 
-    "重启"= 再 _refresh(force_show=True):discover 排除 lost → metas=空 →
-    force_show 分支 `if metas:` 不进 → 不 mount。这是"跨会话不再弹"的端到保证
-    (meta 落盘 lost,新会话 discover 也不会扫到)。
+    真实 user 消息(非 system-reminder):store.append 落盘、history.append 进历史、跨会话保留,
+    带 agent_id + 任务描述 + "勿重新发起"。读回 jsonl(load_mainline)验证持久化。
     """
     store = _make_store(tmp_path, "e2e-no")
     sub_a_path = _seed_meta(store, "sub-A", status="cancelled")
@@ -168,7 +169,7 @@ async def test_press_2_no_marks_lost_and_persists(tmp_path: Path) -> None:
         prompt = app.query_one("ResumePrompt")
         assert set(prompt._agent_ids) == {"sub-A", "sub-B"}  # noqa: SLF001
 
-        # 按 2/No:widget.action_ignore → bg task _on_resume_dismissed(整批 ids)
+        # 按 2/No(B):widget.action_ignore → bg task _on_resume_dismissed(整批 ids)
         await prompt.action_ignore()
         await pilot.pause()
         await _drain_bg_tasks(app)
@@ -182,19 +183,24 @@ async def test_press_2_no_marks_lost_and_persists(tmp_path: Path) -> None:
         # (b) _reminder_turn 撤回(无可续 → None;_rewrite_reminder([]) 撤旧不重注)
         assert app._reminder_turn is None  # noqa: SLF001
 
-        # (c) _dismissal_turn 出现,含整批 + resume_agent 反信号
-        assert app._dismissal_turn is not None  # noqa: SLF001
-        dtxt = app._dismissal_turn.messages[0].content[0].text  # noqa: SLF001
-        assert "sub-A" in dtxt and "sub-B" in dtxt
-        assert "resume_agent" in dtxt
+        # (c) 真实 user 消息落盘 jsonl + 进 history(非 system-reminder)。读回 jsonl 验持久化。
+        turns = await app._store.load_mainline()  # noqa: SLF001
+        notice_texts = [
+            b.text  # noqa: SLF001
+            for t in turns for m in t.messages for b in m.content
+            if isinstance(b, TextBlock) and "我已取消" in b.text
+        ]
+        assert len(notice_texts) == 1
+        notice = notice_texts[0]
+        assert "sub-A" in notice and "sub-B" in notice
+        assert "任务 sub-A" in notice  # 描述(prompt "任务 sub-A")
+        assert "无需" in notice and "重新发起" in notice and "resume_agent" in notice
+        assert "<system-reminder>" not in notice
 
-        # (d) _lost_agent_ids 累积整批(反信号源)
-        assert app._lost_agent_ids == {"sub-A", "sub-B"}  # noqa: SLF001
-
-        # (e) widget 已卸载(action_ignore 内 self.remove())
+        # (d) widget 已卸载(action_ignore 内 self.remove())
         assert list(app.query("ResumePrompt")) == []
 
-        # (f) 重启:再 _refresh(force_show=True) → 不弹(discover 排除 lost)
+        # (e) 重启:再 _refresh(force_show=True) → 不弹(discover 排除 lost)
         await app._refresh_resume_prompt(force_show=True)
         await pilot.pause()
         assert list(app.query("ResumePrompt")) == [], "lost 的 agent 重启不应再弹"
@@ -244,13 +250,11 @@ async def test_press_1_yes_submits_continue(
 # ---- 用例 5:ResumePrompt 挂载即取焦(1/2 键可用);dismiss 后回焦主输入 ----
 
 
-async def test_resume_prompt_takes_focus_and_refocuses_input(tmp_path: Path) -> None:
-    """ResumePrompt mount 即取焦 → 1/2 键生效;按 2/No 卸载后焦点回主输入。
+async def test_resume_prompt_takes_focus_hides_input_and_restores(tmp_path: Path) -> None:
+    """ResumePrompt mount 即取焦 + 隐藏主输入(强制先 1/2 决策);按 2/No 卸载后恢复可见 + 焦点。
 
-    防 review Finding:旧 _mount_resume_prompt 未 focus(),数字键 1/2 落到 InputArea
-    被当普通字符,action_confirm/action_ignore 不触发(对齐 PermissionPrompt/ChoicePrompt
-    均 mount 后 focus)。dismiss 后焦点回归 #input —— Textual 移除已聚焦 widget 的落点
-    不保证是主输入,需显式 _refocus_main_input。
+    对齐 ChoicePrompt ask_user 隐藏 #input:弹窗期间输入框不可见,消除"焦点在弹窗但输入框
+    看着能用"的歧义。决策后 _refocus_main_input 恢复 #input.display=True + focus。
     """
     store = _make_store(tmp_path, "e2e-focus")
     _seed_meta(store, "sub-A", status="cancelled")
@@ -258,18 +262,22 @@ async def test_resume_prompt_takes_focus_and_refocuses_input(tmp_path: Path) -> 
     app = BirdApp(MockProvider(delay=0.0), store=store, resume=False)
     async with app.run_test(size=(90, 24)) as pilot:
         await pilot.pause()
+        main_input = app.query_one("#input", InputArea)
+        assert main_input.display is True  # 初始可见
         assert isinstance(app.focused, InputArea)  # on_mount 焦点在主输入
 
         await app._refresh_resume_prompt(force_show=True)
         await pilot.pause()
         prompt = app.query_one("ResumePrompt")
-        # 挂载后焦点应在 ResumePrompt:1/2 键才会触发 action_confirm/action_ignore
+        # 挂载后:焦点在 ResumePrompt + 主输入被隐藏(强制先 1/2 决策)
         assert app.focused is prompt
+        assert main_input.display is False
 
-        # 按 2/No → widget 卸载 + bg 任务;焦点应回主输入(用户继续打字)
+        # 按 2/No → widget 卸载 + bg 任务;主输入恢复可见 + 焦点
         await prompt.action_ignore()
         await pilot.pause()
         await _drain_bg_tasks(app)
 
         assert list(app.query("ResumePrompt")) == []
+        assert main_input.display is True
         assert isinstance(app.focused, InputArea)
