@@ -4,9 +4,9 @@
 覆盖:
 - worktree meta(isolation="worktree")续跑:resume_subagent 探查 create_worktree(复用
   agent_id)自愈;成功 → 透传 isolation 构造 runner + launch_async 派发(异步)。
-- create_worktree 抛 FileExistsError(分支不符,无法自愈)→ 降级:侧链最后产出包成
-  落点 A notification 注入(enqueue + is_task_notification user 行 + notify_wake)
-  + force 清孤儿 worktree。
+- create_worktree 抛 FileExistsError(分支不符,无法自愈)→ B 方案:返回侧链最后产出(模型驱动,
+  不系统注入)、**不 force-clean 孤儿**(mismatch 时 worktree 可能正被活跃使用,force 会毁未提交
+  工作;孤儿由 agent 正常完成时的 cleanup_subagent_worktree 清理或安全驻留)+ 落收敛 dequeue。
 
 设计说明(brief 据实调整):brief 原想 try/except 包住 launch_async/run()——但(1)异步路径
 异常在后台 _supervise task 不冒泡到 resume_subagent;(2)同步路径 runner.run() 内 except Exception
@@ -93,12 +93,13 @@ class _FakeManager:
         self._controller = controller
         self._live: dict[str, object] = {aid: object() for aid in (live_agent_ids or set())}
         self.launched: list[object] = []
+        self.resumed: list[str] = []
 
     def has_live(self, agent_id: str) -> bool:
         return agent_id in self._live
 
     async def mark_resumed(self, agent_id: str, status: str = "completed") -> None:  # noqa: ARG002
-        pass
+        self.resumed.append(agent_id)
 
     async def launch_async(self, runner: object) -> _LaunchAck:
         self.launched.append(runner)
@@ -243,23 +244,37 @@ async def test_resume_worktree_state_mismatch_degrades_to_inject(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """create_worktree 抛 FileExistsError(分支不符)→ B 方案:返回侧链最后产出,不注入、不清孤儿。
+    """create_worktree 抛 FileExistsError(分支不符)→ B 方案:返回侧链最后产出,不续跑、不注入、
+    **不 force-clean 孤儿**(mismatch 恰发生在 worktree 被活跃使用时,force 会删未提交工作)。
 
-    断言:未构造 runner / 未 launch;不系统注入(无 enqueue/notification);不清孤儿 worktree;
-    result.text 含侧链最后 assistant 文本。
+    侧链用「## 待办清单」头使 _sidechain_looks_complete 判未完成 → 越过完成短路、抵达 worktree
+    probe(旧用「旧的部分产出 ABC」被 is_terminal_report_text 判完成短路,probe 零覆盖)。
+    断言:probe 被调(create_worktree 命中)/ 未构造 runner / 未 launch / 不注入 / 不清孤儿
+    (remove_worktree 未调)/ 落收敛 dequeue(mark_resumed)/ 返回侧链最后 assistant 文本。
     """
+    import birdcode.utils.worktree as wt_mod
+
     _FakeRunner.constructed.clear()
     _write_meta(tmp_path, agent_id="sub-wt-dead", is_async=True, isolation="worktree")
-    _write_sidechain(tmp_path, "sub-wt-dead", text="旧的部分产出 ABC")
+    _write_sidechain(tmp_path, "sub-wt-dead", text="## 待办清单\n- [ ] 进行中")
 
     store = _FakeStore()
     controller = _FakeController()
     mgr = _FakeManager(store=store, controller=controller)
 
+    create_calls: list[tuple[Path, str]] = []
+
     async def _boom_create(main_repo: Path, name: str, *, base_ref: str = "origin/HEAD") -> Path:  # noqa: ARG001
+        create_calls.append((main_repo, name))
         raise FileExistsError(f"worktree 已存在但状态不符: {name}")
 
+    remove_calls: list[tuple[tuple, dict]] = []
+
+    async def _spy_remove(*args: object, **kwargs: object) -> None:
+        remove_calls.append((args, kwargs))
+
     monkeypatch.setattr(resume_mod, "create_worktree", _boom_create)
+    monkeypatch.setattr(wt_mod, "remove_worktree", _spy_remove)
 
     result = await resume_subagent(
         agent_id="sub-wt-dead",
@@ -267,13 +282,19 @@ async def test_resume_worktree_state_mismatch_degrades_to_inject(
         deps=_deps(tmp_path, manager=mgr),
     )
 
-    # B 方案:不续跑、不系统注入、不清孤儿;resume_agent 返回侧链最后内容(模型驱动)
+    # probe 被调(证明走的是 mismatch 分支,非完成短路)
+    assert len(create_calls) == 1
+    assert create_calls[0][1] == "sub-wt-dead"
+    # B 方案:不续跑、不系统注入、不 force-clean 孤儿(worktree 被活跃用时 force 会毁未提交工作)
     assert _FakeRunner.constructed == []
     assert mgr.launched == []
     assert store.calls == []  # 不 inject(无 enqueue/notification)
+    assert remove_calls == []  # 不清孤儿(F1:去掉破坏性 force-clean)
     assert controller.woken == 0
+    # 收敛:短路返回落 dequeue 标记(_resume_pending / discover 下次不再列)
+    assert mgr.resumed == ["sub-wt-dead"]
     assert result.outcome == "sync_done"
-    assert "旧的部分产出 ABC" in result.text  # 返回侧链最后 assistant 文本
+    assert "## 待办清单" in result.text  # 返回侧链最后 assistant 文本(模型驱动)
 
 
 # ---- Final review fix:降级注入后 meta 必须刷终态(error),避免 discover 永久列出 ----

@@ -458,26 +458,39 @@ class BirdApp(App[None]):
         from birdcode.session.subagent_meta import list_subagent_metas
 
         rows = split_live_segment(self._store.mainline_rows())
-        # 主 agent 已收到完成结果的 async agentId:dequeue(消费 / resume mark_resumed 标记)或
-        # completed/error enqueue(完成通知)。cancelled 不算(中断≠完成,可能需续跑)。
+        # 主 agent 已收到完成结果 / 已被提示过的 async agentId:
+        # - queue-operation dequeue(消费 / resume mark_resumed 标记)或 completed/error enqueue
+        #   (完成通知);cancelled 不算(中断≠完成,可能需续跑)。
+        # - isTaskNotification user 行(含本函数上次落的 resume hint):防同一 agent 的 hint
+        #   在每次 /resume 重复堆积——模型未 act 时旧 hint 仍在主线,重复落盘只剩噪声(#5)。
         handled: set[str] = set()
         for obj in rows:
-            if not isinstance(obj, dict) or obj.get("type") != "queue-operation":
+            if not isinstance(obj, dict):
                 continue
             aid = obj.get("agentId")
             if not aid:
                 continue
-            if obj.get("operation") == "dequeue":
+            if obj.get("type") == "queue-operation":
+                if obj.get("operation") == "dequeue":
+                    handled.add(aid)
+                elif obj.get("operation") == "enqueue" and obj.get("status") in (
+                    "completed",
+                    "error",
+                ):
+                    handled.add(aid)
+            elif obj.get("type") == "user" and obj.get("isTaskNotification"):
                 handled.add(aid)
-            elif obj.get("operation") == "enqueue" and obj.get("status") in ("completed", "error"):
-                handled.add(aid)
-        # 扫 meta:is_async + 未 handled → 逐个落盘 hint(各自 agentId,find_unresponded 据此配对),
-        # 最后一次 wake:所有 hint 在同一次 _process_wake 前落盘,主 agent 一个 turn 看到全部
-        # (否则逐个 wake 各触发一轮 = N 轮往返,见 ee6e8090 时序问题)。
+        # 扫 meta:is_async + 未 handled + 非终态 → 逐个落盘 hint。status 过滤补压缩点缺口:
+        # completed/error 的完成通知可能落在压缩点前 OLD 段(handled 只扫 live 段扫不到,#3),
+        # lost 已被用户丢弃不可续——都不再 hint。cancelled/running/idle 仍 hint(可能需续跑)。
+        # 各自 agentId(find_unresponded 据此配对);最后一次 wake:所有 hint 在同一次
+        # _process_wake 前落盘,主 agent 一个 turn 看到全部(否则逐个 wake=N 轮往返,ee6e8090)。
         pending = [
             m.agent_id
             for m in list_subagent_metas(sub_dir)
-            if m.is_async and m.agent_id not in handled
+            if m.is_async
+            and m.status not in ("completed", "error", "lost")
+            and m.agent_id not in handled
         ]
         for aid in pending:
             await self._append_async_resume_hint(aid)
@@ -1071,7 +1084,10 @@ class BirdApp(App[None]):
                         pending = self._tools.pop(b.tool_use_id, None)
                         if pending is None:
                             continue
-                        # 精确匹配 ESC/repair 中断模板前缀(避免普通工具 error 含"中断"误判)。
+                        # 精确匹配 ESC/repair 中断模板【短语子串】,避免普通工具 error
+                        # 含"中断"误判。用 `in` 子串非 startswith:原文形如
+                        # 「子 agent X 执行被中断…」「工具调用因会话中断未完成…」,
+                        # 模板在中段;改 startswith 会漏判 2/3。
                         is_interrupt = b.is_error and any(
                             m in b.content
                             for m in ("执行被中断", "用户中断(Esc)", "因会话中断未完成")
@@ -1105,8 +1121,15 @@ class BirdApp(App[None]):
                     # 都写进 Turn 起始的 md(挂在工具行之前)→ 工具行渲染到回复之后(order bug)。
                     await self._close_markdown()
             await self._close_markdown()
-        # 重放完清残留:tool_use 无匹配 result 时 ToolLine 留 _tools 计时器转;_diff_pending
+        # 重放完清残留:无匹配 result 的 ToolLine 仍挂着 0.12s 计时器转(set_interval 在 start),
+        # 仅 _tools.clear() 只丢字典引用、widget 仍挂 DOM 计时器永转 → 先 finish 成「⚡ 中断」停转
+        # (历史 tool_use 无 result = 当初被中断,与上方 per-result 中断分支一致);_diff_pending
         # 无 EditDiff 跟随。清掉防渗进下个 live turn(/clear 与 Interrupted 另有清理,此处补 replay)。
+        for tool_line in self._tools.values():
+            try:
+                tool_line.finish(ok=False, summary="⚡ 中断")
+            except Exception:  # noqa: BLE001 - 清理失败不杀 resume
+                log.debug("replay 清理 ToolLine 计时器失败", exc_info=True)
         self._tools.clear()
         self._diff_pending.clear()
         self._pin_to_bottom()

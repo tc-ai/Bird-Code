@@ -22,7 +22,7 @@ from birdcode.session.codec import load_sidechain_turns
 from birdcode.session.paths import subagent_jsonl_path, subagent_meta_path
 from birdcode.session.subagent_meta import read_subagent_meta
 from birdcode.utils.logging import get_logger
-from birdcode.utils.worktree import create_worktree, remove_worktree, worktree_path
+from birdcode.utils.worktree import create_worktree
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -79,16 +79,6 @@ async def _finalize_resume(
     await deps.manager.mark_resumed(agent_id, "completed")
 
 
-async def _cleanup_orphan_worktree(project_root: Path, agent_id: str) -> None:
-    """worktree 状态不符时强制清理孤儿(remove_worktree force=True),下次 create_worktree
-    重建干净。best-effort(失败仅 log)。"""
-    wt = worktree_path(project_root, agent_id)
-    try:
-        await remove_worktree(project_root, wt, force=True)
-    except Exception:  # noqa: BLE001
-        log.debug("清理孤儿 worktree 失败 wt=%s(best-effort)", wt, exc_info=True)
-
-
 async def resume_subagent(*, agent_id: str, direction: str, deps: ResumeDeps) -> ResumeResult:
     meta_path = subagent_meta_path(
         deps.root,
@@ -115,6 +105,9 @@ async def resume_subagent(*, agent_id: str, direction: str, deps: ResumeDeps) ->
     # AgentRegistry 真实方法名是 .resolve(非 .get);返回 None → 该 agent 类型已不存在
     defn = deps.agent_registry.resolve(meta.agent_type)
     if defn is None:
+        # agent 类型已删 → 永远无法续跑。落收敛标记(meta→completed + dequeue),免得
+        # _resume_pending / discover 每次重新列出这个不可续的 agent(#7)。
+        await _finalize_resume(deps, meta_path, agent_id, meta.status)
         return ResumeResult(
             outcome="sync_done", text=f"无法续跑:agent 类型 {meta.agent_type} 已不存在"
         )
@@ -142,21 +135,27 @@ async def resume_subagent(*, agent_id: str, direction: str, deps: ResumeDeps) ->
     # synthetic assistant,文案不像终态 → completed 不命中;此处拦截返「无输出」)。
     if not _has_assistant_output(turns):
         log.info("空侧链:agent %s 无 assistant 产出 → 标 interrupted 无输出,不续跑", agent_id)
-        await _finalize_resume(deps, meta_path, agent_id, "completed")
+        # 传 meta.status(非字面量 "completed"):_finalize_resume 仅当 status 非终态时才写 meta。
+        # 此处 meta 多为 running(中断过早),传 "completed" 会让其跳过 meta 写入 → meta 永不收敛
+        # → discover 持续列出该空侧链 agent(#4)。传真实 status → 写成 completed 收敛。
+        await _finalize_resume(deps, meta_path, agent_id, meta.status)
         return ResumeResult(
             outcome="sync_done",
             text=f"{agent_id} 中断过早,无可恢复产出(interrupted,无输出)",
         )
 
     # worktree probe(仅未完成才探查:completed/空已上面短路,不重建孤儿 worktree)。
-    # 状态不符(分支被改/detached)→ FileExistsError → force-clean 孤儿(#5)+ 返回侧链 + 收敛标记。
-    # 同步探查因 runner.run() 的 except 会吞 FileExistsError,故派发前探查对 sync/async 统一生效。
+    # 状态不符(分支被改/detached)→ FileExistsError → 返回侧链最后内容 + 收敛标记。
+    # **不 force-clean 孤儿**:mismatch 恰发生在 worktree 被活跃使用时(用户切了分支/detached),
+    # remove_worktree(force=True) 的 --force/-ff 会强删未提交工作,违反 cleanup_subagent_worktree
+    # 的 force=False 保留策略(脏→留)。孤儿由 agent 正常完成时的 cleanup_subagent_worktree 清理,
+    # 或按保留策略安全驻留(不丢 commit)。同步探查因 runner.run() 的 except 会吞 FileExistsError,
+    # 故派发前探查对 sync/async 统一生效。
     if meta.isolation == "worktree":
         try:
             await create_worktree(deps.project_root, agent_id)
         except (FileExistsError, RuntimeError) as e:
-            log.warning("worktree %s 状态不符/创建失败,清理孤儿 + 返回侧链最后:%s", agent_id, e)
-            await _cleanup_orphan_worktree(deps.project_root, agent_id)  # force-clean 自愈(#5)
+            log.warning("worktree %s 状态不符/创建失败,返回侧链最后:%s", agent_id, e)
             final = _read_sidechain_final_text(sidechain)
             await _finalize_resume(deps, meta_path, agent_id, meta.status)
             return ResumeResult(

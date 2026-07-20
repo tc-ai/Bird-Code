@@ -70,6 +70,11 @@ class _LiveTrackingManager:
     def has_live(self, agent_id: str) -> bool:
         return agent_id in self._live
 
+    async def mark_resumed(self, agent_id: str, status: str = "completed") -> None:  # noqa: ARG002
+        # 与其它 resume 测试 fake 对齐:resume_subagent 短路分支会调;本文件用例抵达 launch_async
+        # 不触发,留方法免得将来加短路用例时 AttributeError。
+        pass
+
     async def launch_async(self, runner: object) -> _LaunchAck:
         aid = runner.agent_id  # type: ignore[attr-defined]
         self._live[aid] = object()  # 镜像真实 launch_async:_live[id] = task
