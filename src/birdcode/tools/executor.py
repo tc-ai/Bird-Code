@@ -112,9 +112,13 @@ class ToolExecutor:
     def annotate_tool_uses(self, tool_uses: list[ToolUseBlock]) -> None:
         """落盘前给 agent tool_use 注入 agent_id(就地改 tu.agent_id)。
 
-        - _AgentTool/_ForkSkillTool(is_agent_tool=True,input 无 agent_id):新生成 sub-xxx。
-        - resume_agent(input.agent_id 存在):复制被续跑的 agent_id(续跑复用原 id,不新生成)。
+        - resume_agent:复制 input.agent_id(续跑复用原 id,不新生成)。
+        - _AgentTool/_ForkSkillTool(其它 is_agent_tool):新生成 sub-xxx(不读 input.agent_id)。
         - 普通工具(is_agent_tool=False)/未知工具:不动(agent_id 保持 None)。
+
+        仅 resume_agent 复用 input.agent_id —— Pydantic extra=ignore 会从 validated args 丢弃
+        agent_id,但此处读 raw tu.input(落盘前),若不 gate,模型在 _AgentTool 调用幻觉带
+        agent_id 会复用既有子 agent 的 id(meta/sidechain 碰撞、历史污染)。
 
         agent_id 随 tu 落盘主线 assistant 行(ToolUseBlock.agent_id),供 resume 配对直联、
         续跑定位、二次中断占位。必须在 agent_loop 落盘(on_message)前调(见 agent_loop)。
@@ -123,11 +127,15 @@ class ToolExecutor:
             tool = self._registry.get(tu.name)
             if tool is None or not getattr(tool, "is_agent_tool", False):
                 continue
-            existing = tu.input.get("agent_id") if isinstance(tu.input, dict) else None
-            if isinstance(existing, str) and existing:
-                tu.agent_id = existing  # resume_agent:复用被续跑的 agent_id
+            if tu.name == "resume_agent":
+                existing = tu.input.get("agent_id") if isinstance(tu.input, dict) else None
+                tu.agent_id = (
+                    existing
+                    if isinstance(existing, str) and existing
+                    else f"sub-{uuid.uuid4().hex[:12]}"
+                )
             else:
-                tu.agent_id = f"sub-{uuid.uuid4().hex[:12]}"  # 新派发:生成
+                tu.agent_id = f"sub-{uuid.uuid4().hex[:12]}"  # 新派发:总新生成,防幻觉碰撞
 
     def last_partial(self) -> dict[str, ToolResult]:
         """上次 execute_batch 被 cancel 时已完成的真实结果(按 tool_use_id);正常完成则空。

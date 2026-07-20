@@ -441,54 +441,44 @@ class BirdApp(App[None]):
         self._refresh_status()
 
     async def _resume_pending_notifications(self) -> None:
-        """resume:扫主 jsonl live 段,async tool_use 无完成 notification → 注入 resume_agent 提示。
+        """resume:扫 subagents meta,is_async + 未收到完成结果 → 注入 resume_agent 提示。
 
-        B 方案:不系统读侧链恢复。扫 async tool_use(run_in_background=true
-        + agent_id),
-        查对应通知(queue-operation enqueue/dequeue/remove 行 或
-        isTaskNotification user 行的 agentId);
-        无通知的 async → 注入提示让模型 ask_user + resume_agent(模型驱动)。
-        压缩点前(OLD 段)不扫(接受丢失)。best-effort:无 store/controller → return。
+        扫 meta(meta.is_async 是 runner 写的真相,覆盖 worktree 强制异步 + defn-default async,
+        #2),取代旧的主线 tool_use input 扫描(后者漏 worktree/defn-default)。handled = 主线有该
+        agentId 的 dequeue(正常消费 / resume mark_resumed 标记 #3)或 completed/error enqueue
+        (完成通知);cancelled 不算(中断≠完成,可能需续跑,#1)。未 handled → 提示模型 ask_user +
+        resume_agent(模型驱动)。压缩点前(OLD 段)不在 live 段(不扫)。best-effort。
         """
         if self._store is None or self._controller is None:
             return
+        sub_dir = self._current_subagents_dir()
+        if sub_dir is None or not sub_dir.exists():
+            return
         from birdcode.session.codec import split_live_segment
+        from birdcode.session.subagent_meta import list_subagent_metas
 
         rows = split_live_segment(self._store.mainline_rows())
-        # 1) 收集 async tool_use 的 agent_id(input.run_in_background=true + agent_id)。
-        async_agent_ids: set[str] = set()
+        # 主 agent 已收到完成结果的 async agentId:dequeue(消费 / resume mark_resumed 标记)或
+        # completed/error enqueue(完成通知)。cancelled 不算(中断≠完成,可能需续跑)。
+        handled: set[str] = set()
         for obj in rows:
-            if not isinstance(obj, dict) or obj.get("type") != "assistant":
+            if not isinstance(obj, dict) or obj.get("type") != "queue-operation":
                 continue
-            for b in (obj.get("message") or {}).get("content") or []:
-                if not isinstance(b, dict) or b.get("type") != "tool_use":
-                    continue
-                inp = b.get("input")
-                if isinstance(inp, dict) and inp.get("run_in_background") and b.get("agent_id"):
-                    async_agent_ids.add(b["agent_id"])
-        if not async_agent_ids:
-            return
-        # 2) 收集已通知的 agent_id(queue-operation 或 isTaskNotification 行的 agentId)。
-        notified: set[str] = set()
-        for obj in rows:
-            if not isinstance(obj, dict):
+            aid = obj.get("agentId")
+            if not aid:
                 continue
-            if obj.get("type") == "queue-operation" and obj.get("operation") in (
-                "enqueue",
-                "dequeue",
-                "remove",
-            ):
-                aid = obj.get("agentId")
-                if aid:
-                    notified.add(aid)
-            elif obj.get("type") == "user" and obj.get("isTaskNotification"):
-                aid = obj.get("agentId")
-                if aid:
-                    notified.add(aid)
-        # 3) 未通知的 async → 逐个落盘 resume_agent 提示(各自 agentId,find_unresponded
-        #    据此配对),**最后一次 wake**:所有提示须在同一次 _process_wake 前落盘,主 agent
-        #    一个 turn 看到全部;否则逐个 wake 各触发一轮 = N 轮往返(见 ee6e8090 时序问题)。
-        pending = async_agent_ids - notified
+            if obj.get("operation") == "dequeue":
+                handled.add(aid)
+            elif obj.get("operation") == "enqueue" and obj.get("status") in ("completed", "error"):
+                handled.add(aid)
+        # 扫 meta:is_async + 未 handled → 逐个落盘 hint(各自 agentId,find_unresponded 据此配对),
+        # 最后一次 wake:所有 hint 在同一次 _process_wake 前落盘,主 agent 一个 turn 看到全部
+        # (否则逐个 wake 各触发一轮 = N 轮往返,见 ee6e8090 时序问题)。
+        pending = [
+            m.agent_id
+            for m in list_subagent_metas(sub_dir)
+            if m.is_async and m.agent_id not in handled
+        ]
         for aid in pending:
             await self._append_async_resume_hint(aid)
         if pending:
@@ -1081,7 +1071,11 @@ class BirdApp(App[None]):
                         pending = self._tools.pop(b.tool_use_id, None)
                         if pending is None:
                             continue
-                        is_interrupt = b.is_error and "中断" in b.content
+                        # 精确匹配 ESC/repair 中断模板前缀(避免普通工具 error 含"中断"误判)。
+                        is_interrupt = b.is_error and any(
+                            m in b.content
+                            for m in ("执行被中断", "用户中断(Esc)", "因会话中断未完成")
+                        )
                         if is_interrupt:
                             summary = "⚡ 中断"
                         else:
@@ -1111,6 +1105,10 @@ class BirdApp(App[None]):
                     # 都写进 Turn 起始的 md(挂在工具行之前)→ 工具行渲染到回复之后(order bug)。
                     await self._close_markdown()
             await self._close_markdown()
+        # 重放完清残留:tool_use 无匹配 result 时 ToolLine 留 _tools 计时器转;_diff_pending
+        # 无 EditDiff 跟随。清掉防渗进下个 live turn(/clear 与 Interrupted 另有清理,此处补 replay)。
+        self._tools.clear()
+        self._diff_pending.clear()
         self._pin_to_bottom()
 
     async def _on_event(self, event: ProviderEvent) -> None:

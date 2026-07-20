@@ -95,9 +95,13 @@ class _FakeManager:
         self._controller = controller
         self._live: dict[str, object] = {aid: object() for aid in (live_agent_ids or set())}
         self.launched: list[object] = []
+        self.resumed: list[str] = []
 
     def has_live(self, agent_id: str) -> bool:
         return agent_id in self._live
+
+    async def mark_resumed(self, agent_id: str, status: str = "completed") -> None:
+        self.resumed.append(agent_id)
 
     async def launch_async(self, runner: object) -> _LaunchAck:
         self.launched.append(runner)
@@ -310,6 +314,8 @@ async def test_completed_meta_refused_not_rerun(
     # 拒绝续跑:不构造 runner、不 launch、不注入、不唤醒
     assert _FakeRunner.constructed == []
     assert mgr.launched == []
+    # #3 收敛:completed 短路返回时落 dequeue 标记(_resume_pending 下次不再 re-hint)
+    assert mgr.resumed == ["sub-x4"]
     assert store.calls == []
     assert controller.woken == 0
     assert result.outcome == "sync_done"

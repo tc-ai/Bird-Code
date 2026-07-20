@@ -15,14 +15,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 from birdcode.agents.manager import SubagentManager
-from birdcode.agents.runner import SubagentRunner, is_terminal_report_text
+from birdcode.agents.runner import SubagentRunner, _update_meta, is_terminal_report_text
 from birdcode.blocks import TextBlock, ToolUseBlock
 from birdcode.conversation import Message, Turn
 from birdcode.session.codec import load_sidechain_turns
 from birdcode.session.paths import subagent_jsonl_path, subagent_meta_path
 from birdcode.session.subagent_meta import read_subagent_meta
 from birdcode.utils.logging import get_logger
-from birdcode.utils.worktree import create_worktree
+from birdcode.utils.worktree import create_worktree, remove_worktree, worktree_path
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -65,6 +65,30 @@ class ResumeResult:
     text: str = ""  # sync 模式的 inline 报告(async 模式为 ack)
 
 
+async def _finalize_resume(
+    deps: ResumeDeps, meta_path: Path, agent_id: str, status: str
+) -> None:
+    """resume 短路返回(完成/空侧链/worktree-mismatch)时收敛:meta 非终态 → 写 completed;
+    落 queue-operation dequeue 标记。使 _resume_pending_notifications 下次把该 agentId 视为
+    已处理(不再 re-hint,修窗口 X/Y 死循环)。best-effort(meta 写失败不杀 resume)。"""
+    if status not in ("completed", "error"):
+        try:
+            _update_meta(meta_path, status="completed")
+        except Exception:  # noqa: BLE001
+            log.debug("_finalize_resume 写 meta 失败 aid=%s(best-effort)", agent_id, exc_info=True)
+    await deps.manager.mark_resumed(agent_id, "completed")
+
+
+async def _cleanup_orphan_worktree(project_root: Path, agent_id: str) -> None:
+    """worktree 状态不符时强制清理孤儿(remove_worktree force=True),下次 create_worktree
+    重建干净。best-effort(失败仅 log)。"""
+    wt = worktree_path(project_root, agent_id)
+    try:
+        await remove_worktree(project_root, wt, force=True)
+    except Exception:  # noqa: BLE001
+        log.debug("清理孤儿 worktree 失败 wt=%s(best-effort)", wt, exc_info=True)
+
+
 async def resume_subagent(*, agent_id: str, direction: str, deps: ResumeDeps) -> ResumeResult:
     meta_path = subagent_meta_path(
         deps.root,
@@ -102,49 +126,43 @@ async def resume_subagent(*, agent_id: str, direction: str, deps: ResumeDeps) ->
         agent_id,
         worktree_name=deps.worktree_name,
     )
-    # worktree 子 agent 续跑:派发前同步探查 create_worktree(自愈 stale lock + 复用 agent_id)。
-    # 状态不符(分支被改/detached)→ FileExistsError → 返回侧链最后内容(B 方案,不降级注入)。
-    # 同步探查因 runner.run() 的 except 会吞 FileExistsError,故派发前探查对 sync/async 统一生效。
-    # runner.run() 二次调 create_worktree 命中快速恢复路径(幂等)。
-    # 非 worktree(isolation=None)不受影响。
-    # 探查在"完成判定"之前:状态不符无论侧链是否像终态都先返回(避免续跑撞脏 worktree)。
-    if meta.isolation == "worktree":
-        try:
-            await create_worktree(deps.project_root, agent_id)
-        except (FileExistsError, RuntimeError) as e:
-            # worktree 状态不符/创建失败 → 无法续跑,返回侧链最后内容(已有产出)。B 方案:
-            # 不再 _degrade_to_inject(系统注入),改返回侧链(模型驱动,主 agent 看内容决定)。
-            log.warning("worktree %s 状态不符/创建失败,返回侧链最后:%s", agent_id, e)
-            final = _read_sidechain_final_text(sidechain)
-            return ResumeResult(
-                outcome="sync_done",
-                text=final or f"{agent_id} worktree 状态不符,无法续跑(侧链无可用报告)",
-            )
-
-    # 空侧链检查(T18):侧链无任何真实 assistant 产出(子 agent 死太早:只有种子 user、缺文件、
-    # 全坏行)→ 无可恢复内容 → 不续跑,返回「interrupted,无输出」友好文本。
-    #
-    # 顺序:必在 T17 交叉校验之前——仅种子 user 的侧链经 repair_trailing_edge 会补一条 synthetic
-    # 占位 assistant(文案不以「## 待办清单」开头)→ T17 会误判「像终态」当完成注入,但其实无任何
-    # 真实产出;T18 提前拦截(_has_assistant_output 跳过 synthetic 占位)返「无输出」。在 T14 worktree
-    # 探查之后:T14 的降级清理(状态不符 worktree)仍优先返回,本块只处理 worktree 已自愈/非 worktree。
+    # 完成判定 + 空侧链:前置于 worktree probe(completed/空侧链不重建 worktree,#4)。
+    # 短路返回时 _finalize_resume 写 meta + 落 dequeue 收敛标记(修窗口 X/Y 死循环,#3)。
     turns = _load_sidechain_turns_safe(sidechain)
+    if meta.status == "completed" or _sidechain_looks_complete(sidechain):
+        final = _read_sidechain_final_text(sidechain)
+        log.info("resume:agent %s 完成(meta=%s) → 返回侧链最后内容", agent_id, meta.status)
+        await _finalize_resume(deps, meta_path, agent_id, meta.status)
+        return ResumeResult(
+            outcome="sync_done",
+            text=final or f"{agent_id} 完成但侧链无可用报告正文",
+        )
+    # 空侧链(无真实 assistant 产出)→ 无可恢复内容 → 返回「interrupted,无输出」+ 收敛标记。
+    # _has_assistant_output 跳过 repair 补的 synthetic 占位(仅种子 user 的侧链会被 repair 补一条
+    # synthetic assistant,文案不像终态 → completed 不命中;此处拦截返「无输出」)。
     if not _has_assistant_output(turns):
         log.info("空侧链:agent %s 无 assistant 产出 → 标 interrupted 无输出,不续跑", agent_id)
+        await _finalize_resume(deps, meta_path, agent_id, "completed")
         return ResumeResult(
             outcome="sync_done",
             text=f"{agent_id} 中断过早,无可恢复产出(interrupted,无输出)",
         )
 
-    # 完成(meta completed 或侧链像终态 end_turn)→ 返回侧链最后内容,不续跑。
-    # B 方案:resume_agent 内部读侧链判断完成,返回报告(模型驱动,不系统自动填主线)。
-    if meta.status == "completed" or _sidechain_looks_complete(sidechain):
-        final = _read_sidechain_final_text(sidechain)
-        log.info("resume:agent %s 完成(meta=%s) → 返回侧链最后内容", agent_id, meta.status)
-        return ResumeResult(
-            outcome="sync_done",
-            text=final or f"{agent_id} 完成但侧链无可用报告正文",
-        )
+    # worktree probe(仅未完成才探查:completed/空已上面短路,不重建孤儿 worktree)。
+    # 状态不符(分支被改/detached)→ FileExistsError → force-clean 孤儿(#5)+ 返回侧链 + 收敛标记。
+    # 同步探查因 runner.run() 的 except 会吞 FileExistsError,故派发前探查对 sync/async 统一生效。
+    if meta.isolation == "worktree":
+        try:
+            await create_worktree(deps.project_root, agent_id)
+        except (FileExistsError, RuntimeError) as e:
+            log.warning("worktree %s 状态不符/创建失败,清理孤儿 + 返回侧链最后:%s", agent_id, e)
+            await _cleanup_orphan_worktree(deps.project_root, agent_id)  # force-clean 自愈(#5)
+            final = _read_sidechain_final_text(sidechain)
+            await _finalize_resume(deps, meta_path, agent_id, meta.status)
+            return ResumeResult(
+                outcome="sync_done",
+                text=final or f"{agent_id} worktree 状态不符,无法续跑(侧链无可用报告)",
+            )
 
     runner = SubagentRunner(
         defn=defn,
@@ -210,7 +228,7 @@ def _has_assistant_output(turns: list[Turn]) -> bool:
 def _read_sidechain_final_text(sidechain_path: Path) -> str | None:
     """读侧链 jsonl 最后一条 assistant 文本块(子 agent 报告正文)。缺/坏 → None。
 
-    镜像 ui.app._read_sidechain_final_text,但不跨层 import ui(agents ← ui 是反向依赖);
+    本函数是侧链最终报告正文的唯一读取点(早期 ui 层有同名镜像,已统一到此处);
     复用 session.codec.load_sidechain_turns(文件缺/全坏行 → [],不抛)。
     """
     if not sidechain_path.exists():

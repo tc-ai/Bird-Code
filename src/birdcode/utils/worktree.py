@@ -21,7 +21,7 @@ log = get_logger("birdcode.utils.worktree")
 def worktree_path(main_repo: Path, name: str) -> Path:
     """worktree 目录路径 <main_repo>/.birdcode/worktrees/<name>。
 
-    单一来源:create_worktree(建)、_degrade_to_inject(清孤儿)、create_worktree 快速恢复
+    单一来源:create_worktree(建)、cleanup_subagent_worktree(清)、create_worktree 快速恢复
     (探查)共用。路径方案一变(可配置根/迁址),只改此处,免得孤儿清理指向错路径 →
     remove_worktree 静默 no-op 留孤儿。
     """

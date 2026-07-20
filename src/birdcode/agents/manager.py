@@ -132,13 +132,17 @@ class SubagentManager:
         self._esc_notify_task = asyncio.create_task(self._join_and_notify())
 
     async def _join_and_notify(self) -> None:
+        me = asyncio.current_task()
         try:
             await self.join_all()
             self._controller.notify_wake()
         except Exception:  # noqa: BLE001 - best-effort,不杀 ESC 路径
             log.debug("ESC 批量 wake 收尾失败(best-effort)", exc_info=True)
         finally:
-            self._esc_notify_task = None
+            # 只清自己:双 ESC 时 ESC2 已用新 task 覆盖 _esc_notify_task,旧 task 完成不应
+            # clobber 新引用(否则新 task 失去 GC 保护,可能在 notify_wake 前被回收)。
+            if self._esc_notify_task is me:
+                self._esc_notify_task = None
 
     def has_live(self, agent_id: str) -> bool:
         """该 agent_id 是否有在跑的异步 task(幂等守卫:续跑前查,避免重复 launch)。
@@ -146,6 +150,22 @@ class SubagentManager:
         _live dict 的公共只读访问器:替代外部对 manager._live 私有字段的直访(如 resume.py)。
         """
         return agent_id in self._live
+
+    async def mark_resumed(self, agent_id: str, status: str = "completed") -> None:
+        """resume_agent 短路返回(完成/空侧链/worktree-mismatch)时落 dequeue 标记,使
+        _resume_pending_notifications 下次把该 agentId 视为已处理(收敛,不再 re-hint)。
+
+        不注入 notification 文本——报告已由 resume_subagent 返回主 agent(模型驱动),系统只
+        标记"已消费"。best-effort(落盘失败仅 log,不杀 resume)。"""
+        try:
+            await self._store.append_queue_operation(
+                operation="dequeue",
+                agent_id=agent_id,
+                tool_use_id="",
+                status=status,
+            )
+        except Exception:  # noqa: BLE001 - best-effort
+            log.debug("mark_resumed 落 dequeue 失败 aid=%s(best-effort)", agent_id, exc_info=True)
 
     def rebind(self, *, store: SessionStore, controller: TurnController) -> None:
         """重绑 store/controller(/resume 或 /compact 后接续新会话句柄)。"""

@@ -97,6 +97,9 @@ class _FakeManager:
     def has_live(self, agent_id: str) -> bool:  # noqa: ARG002
         return False
 
+    async def mark_resumed(self, agent_id: str, status: str = "completed") -> None:  # noqa: ARG002
+        pass
+
     async def launch_async(self, runner: object) -> _LaunchAck:
         self.launched.append(runner)
         return _LaunchAck(agent_id=runner.agent_id, ack_text=f"已派发 {runner.agent_id}")  # type: ignore[attr-defined]
