@@ -1,3 +1,8 @@
+from pathlib import Path
+
+import pytest
+
+from birdcode.session.jsonutil import write_json_atomic
 from birdcode.session.models import SubagentMeta
 from birdcode.session.subagent_meta import (
     list_subagent_metas,
@@ -63,3 +68,39 @@ def test_read_non_utf8_returns_none(tmp_path):
     p = tmp_path / "agent-a1.meta.json"
     p.write_bytes(b"\xff\xfe\x00\x01bad bytes")
     assert read_subagent_meta(p) is None
+
+
+def test_write_json_atomic_preserves_target_on_failure(tmp_path, monkeypatch):
+    """边界 C:tmp 写失败时 target 原文件不被破坏(原子写核心保证)。
+
+    模拟崩溃在 tmp.write_text 中途(patch Path.write_text 抛 OSError)。write_json_atomic
+    写 tmp(非 target),tmp 失败 → os.replace 未执行 → target 原内容保留,杜绝半截 JSON
+    让 read_subagent_meta 返 None、子 agent 永久悬挂。对比旧 path.write_text 直接覆盖:
+    写 target 中途崩溃会留半截 target。
+    """
+    p = tmp_path / "agent-a1.meta.json"
+    original = '{"agentId": "a1", "status": "old"}'
+    p.write_text(original, encoding="utf-8")  # patch 前用真 write 预置
+
+    def _raise(self, *a, **kw):
+        raise OSError("crash mid-write")
+
+    monkeypatch.setattr(Path, "write_text", _raise)
+    with pytest.raises(OSError):
+        write_json_atomic(p, '{"agentId": "a1", "status": "new"}')
+    assert p.read_text(encoding="utf-8") == original  # target 未被破坏
+
+
+def test_write_json_atomic_uses_replace(tmp_path, monkeypatch):
+    """边界 C:write_json_atomic 走 temp+os.replace 原子模式(tmp 名为 <name>.tmp)。"""
+    replaced: list[tuple] = []
+    monkeypatch.setattr(
+        "birdcode.session.jsonutil.os.replace",
+        lambda src, dst: replaced.append((src, dst)),
+    )
+    p = tmp_path / "agent-a1.meta.json"
+    write_json_atomic(p, '{"agentId": "a1"}')
+    assert len(replaced) == 1
+    src, dst = replaced[0]
+    assert dst == p
+    assert src.name == p.name + ".tmp"

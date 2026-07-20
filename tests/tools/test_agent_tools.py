@@ -1,5 +1,6 @@
 # tests/tools/test_agent_tools.py
 """_AgentTool(每 defn 一 tool)+ register_agent_tools 工厂单测。"""
+
 import pytest
 
 from birdcode.agents.definition import AgentDefinition
@@ -30,8 +31,12 @@ class _CapturingRunner:
 
     async def run(self):
         return SubagentReport(
-            is_completed=True, text="完成了", status="completed",
-            duration_ms=10, tokens=5, tool_use_count=0,
+            is_completed=True,
+            text="完成了",
+            status="completed",
+            duration_ms=10,
+            tokens=5,
+            tool_use_count=0,
         )
 
 
@@ -53,8 +58,15 @@ def _patch_runner(monkeypatch):
 
 def _tool(defn=None, **over):
     base = dict(
-        defn=defn or _defn(), cfg=None, app=None, ctx=None, project_root=None,
-        parent_provider=None, parent_registry=None, parent_gate=None, spawn_depth=0,
+        defn=defn or _defn(),
+        cfg=None,
+        app=None,
+        ctx=None,
+        project_root=None,
+        parent_provider=None,
+        parent_registry=None,
+        parent_gate=None,
+        spawn_depth=0,
     )
     base.update(over)
     return _AgentTool(**base)
@@ -70,6 +82,17 @@ async def test_sync_returns_tooloutput_with_result():
     assert out.tool_use_result["agentType"] == "general-purpose"
     assert _CapturingRunner.last.kwargs["spawn_depth"] == 1  # 父 0 → 子 1
     assert _CapturingRunner.last.kwargs["model_override"] == ""  # D5 继承父
+
+
+async def test_execute_plumbs_agent_id_and_tool_use_id_to_runner():
+    """execute 的 agent_id/tool_use_id 透传 runner(替换占位 (sync-agent),补 plumb 缺口)。"""
+    await _tool(_defn(run_in_background=False)).execute(
+        prompt="做 X",
+        agent_id="sub-injected123",
+        tool_use_id="toolu_real",
+    )
+    assert _CapturingRunner.last.kwargs["agent_id"] == "sub-injected123"
+    assert _CapturingRunner.last.kwargs["tool_use_id"] == "toolu_real"
 
 
 async def test_async_without_mgr_returns_error():
@@ -93,7 +116,8 @@ async def test_async_with_mgr_returns_launch_ack():
     assert tur["agentId"] == "sub-fixed"
     assert "sub-fixed" in tur["outputFile"]
     assert mgr.launched_runner.kwargs["is_async"] is True
-    assert mgr.launched_runner.kwargs["tool_use_id"] == "(async-agent)"
+    # execute 不经 executor 时 tool_use_id 默认 "";真实场景 executor 透传真实 tu.id
+    assert mgr.launched_runner.kwargs["tool_use_id"] == ""
     assert mgr.launched_runner.kwargs["model_override"] == ""
 
 
@@ -123,8 +147,16 @@ def test_register_agent_tools_one_per_defn():
     agents.register(_defn(name="general-purpose", description="d"))
     reg = ToolRegistry()
     register_agent_tools(
-        reg, agents, cfg=None, app=None, ctx=None, project_root=None,
-        parent_provider=None, parent_registry=None, parent_gate=None, spawn_depth=0,
+        reg,
+        agents,
+        cfg=None,
+        app=None,
+        ctx=None,
+        project_root=None,
+        parent_provider=None,
+        parent_registry=None,
+        parent_gate=None,
+        spawn_depth=0,
     )
     assert {"explore", "general-purpose"} <= set(reg.names())
     assert reg.get("explore").kind == "read"

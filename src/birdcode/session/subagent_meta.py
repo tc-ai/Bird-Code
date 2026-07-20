@@ -1,11 +1,12 @@
 # src/birdcode/session/subagent_meta.py
 """子 agent meta.json 读写(enriched,可变)。/agents 视图扫 *.meta.json 即得全局状态。"""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from birdcode.session.jsonutil import read_json_dict
+from birdcode.session.jsonutil import read_json_dict, write_json_atomic
 from birdcode.session.models import SubagentMeta
 from birdcode.utils.logging import get_logger
 
@@ -13,13 +14,14 @@ log = get_logger("birdcode.session.subagent_meta")
 
 
 def write_subagent_meta(path: Path, meta: SubagentMeta) -> None:
-    """覆盖写 meta.json(唯一可变文件:状态/计时更新)。IO 失败只 log。"""
+    """原子写 meta.json(唯一可变文件:状态/计时更新)。IO 失败只 log。
+
+    经 write_json_atomic(temp + os.replace)原子写,杜绝覆盖写中途崩溃留半截 JSON
+    → read_subagent_meta 返 None → 子 agent 永久悬挂(边界 C)。
+    """
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(meta.model_dump(by_alias=True, exclude_none=True), ensure_ascii=False),
-            encoding="utf-8",
-        )
+        text = json.dumps(meta.model_dump(by_alias=True, exclude_none=True), ensure_ascii=False)
+        write_json_atomic(path, text)
     except OSError:
         log.exception("write_subagent_meta 失败(不杀主循环)")
 

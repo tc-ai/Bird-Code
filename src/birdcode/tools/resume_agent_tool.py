@@ -5,6 +5,7 @@
 sync 子 agent → 阻塞 inline 返回报告;async → 回 ack,完成走 task-notification。
 授权闸门在触发方(UI /「继续」路由,T11/T13);本工具假定已授权。
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -39,7 +40,7 @@ class ResumeAgentTool(Tool):
     """
 
     parameters = ResumeAgentInput
-    kind = "write"            # 续跑会执行工具,有副作用
+    kind = "write"  # 续跑会执行工具,有副作用
     parallel_safe = False
     # 派生子 agent(复用 id)→ build_child_registry 排除,堵递归(同类 _AgentTool)
     is_agent_tool = True
@@ -68,8 +69,10 @@ class ResumeAgentTool(Tool):
         if provider is not None:
             self._deps.parent_provider = provider
 
-    async def execute(self, *, agent_id: str, direction: str) -> str:  # type: ignore[override]
-        result = await resume_subagent(
-            agent_id=agent_id, direction=direction, deps=self._deps
-        )
+    async def execute(  # type: ignore[override]
+        self, *, agent_id: str, direction: str, tool_use_id: str = ""
+    ) -> str:
+        # tool_use_id 由 executor._exec_one 对 is_agent_tool 工具透传(_AgentTool plumb 用);
+        # resume_agent 续跑已有 agent(用 input.agent_id),tool_use_id 不需要,接收忽略。
+        result = await resume_subagent(agent_id=agent_id, direction=direction, deps=self._deps)
         return result.text

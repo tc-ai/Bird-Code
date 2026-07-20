@@ -47,7 +47,15 @@ def block_to_dict(block: ContentBlock) -> dict[str, Any]:
     if isinstance(block, ThinkingBlock):
         return {"type": "thinking", "text": block.text, "signature": block.signature}
     if isinstance(block, ToolUseBlock):
-        return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
+        out: dict[str, Any] = {
+            "type": "tool_use",
+            "id": block.id,
+            "name": block.name,
+            "input": block.input,
+        }
+        if block.agent_id is not None:
+            out["agent_id"] = block.agent_id  # 持久化字段(仿 isTaskNotification 条件注入,避免噪声)
+        return out
     if isinstance(block, ToolResultBlock):
         return {
             "type": "tool_result",
@@ -83,7 +91,13 @@ def block_from_dict(d: dict[str, Any]) -> ContentBlock | None:
         if not isinstance(tid, str) or not isinstance(name, str):
             return None
         inp = d.get("input")
-        return ToolUseBlock(id=tid, name=name, input=inp if isinstance(inp, dict) else {})
+        agent_id = d.get("agent_id")
+        return ToolUseBlock(
+            id=tid,
+            name=name,
+            input=inp if isinstance(inp, dict) else {},
+            agent_id=agent_id if isinstance(agent_id, str) else None,
+        )
     if t == "tool_result":
         tuid = d.get("tool_use_id")
         content = d.get("content")
@@ -434,18 +448,23 @@ def repair_trailing_edge(
         tu_by_id: dict[str, ToolUseBlock] = {
             b.id: b for m in last_turn.messages for b in m.content if isinstance(b, ToolUseBlock)
         }
-        repair_blocks: list[ContentBlock] = [
-            ToolResultBlock(
-                tool_use_id=tid,
-                content=(
-                    error_message_fn(tu_by_id[tid])
-                    if error_message_fn is not None and tid in tu_by_id
-                    else "工具调用因会话中断未完成,请重新发起"
-                ),
-                is_error=True,
-            )
-            for tid in sorted(unpaired)
-        ]
+        repair_blocks: list[ContentBlock] = []
+        for tid in sorted(unpaired):
+            tu = tu_by_id.get(tid)
+            if tu is not None and tu.agent_id:
+                # agent tool / resume_agent 中断:带 agent_id 续跑提示(模型驱动)。
+                # 明确 sync/async(按原方式 run_in_background,resume_agent 按 meta.is_async)。
+                is_async = isinstance(tu.input, dict) and tu.input.get("run_in_background") is True
+                mode = "异步" if is_async else "同步"
+                content = (
+                    f"子 agent {tu.agent_id} 执行被中断,如需续跑以{mode}方式调 "
+                    f"resume_agent(agent_id='{tu.agent_id}'),在调用 resume_agent 前务必获得用户同意"
+                )
+            elif error_message_fn is not None and tu is not None:
+                content = error_message_fn(tu)
+            else:
+                content = "工具调用因会话中断未完成,请重新发起"
+            repair_blocks.append(ToolResultBlock(tool_use_id=tid, content=content, is_error=True))
         m = Message(role="user", content=repair_blocks, synthetic=True)
         last_turn.messages.append(m)
         synthetics.append(m)
@@ -467,38 +486,26 @@ def repair_trailing_edge(
 
 
 def _mark_pending_sync_agent_tooluses(
-    turns: list[Turn], sync_agent_types: set[str],
+    turns: list[Turn],
+    agent_types: set[str],
 ) -> int:
-    """把「待续跑 sync agent tool_use」的合成 tool_result content 改为占位文案。
+    """把【旧会话·待续跑 sync agent】的合成 tool_result content 改为占位文案(name fallback)。
 
-    前置:turns 已过 ``repair_trailing_edge``(末尾 unpaired tool_use 已补合成 error
-    tool_result,synthetic=True)。本函数在 repair 之后跑:对识别为「待续跑 sync agent」
-    的合成 tool_result,把 content 覆盖为 ``_SYNC_PENDING_PLACEHOLDER``(含「中断/续跑」),
-    覆盖 repair 默认「请重新发起」。真结果由 ``resume_agent`` inline 返回(resume 路径),
-    故占位只是历史中的临时脚手架。
-
-    识别(关键):主会话 sync agent tool_use 的 id 是 LLM 生成(toolu_xxx),runner 内部
-    tool_use_id="(sync-agent)" 只进子 agent meta/queue-op、不进主 jsonl;且中断期真
-    tool_result / toolUseResult 均未落盘。故靠 **tool_use.name == 非终态 sync
-    meta.agent_type** 配对(sync 阻塞,同时刻仅一个在跑):sync_agent_types 即当前会话
-    非终态 sync 子 agent 的 agent_type 集合(由 store.load_mainline 经
-    find_resumable_subagents 过滤 is_async=False 算出后传入)。
+    新会话 tool_use 带 agent_id → repair 已补带 agent_id 的续跑提示(模型驱动 resume_agent),
+    本函数跳过(tu.agent_id 非空)。旧会话 tool_use 无 agent_id → name ∈ agent_types 配对,
+    覆盖 repair 默认「请重新发起」为 _SYNC_PENDING_PLACEHOLDER(待续跑;真结果经 resume_agent
+    inline 返回)。sync 阻塞,同时刻仅一个在跑,按类型名配对。
 
     只改 synthetic=True 的 tool_result(repair 补的);真实 tool_result 绝不动。
-    返回改写条数(0=未命中,观测/日志用)。空 sync_agent_types → 直接返 0(无非终态
-    sync meta 时零成本短路)。
+    返回改写条数(0=未命中)。agent_types 空 → 短路。
     """
-    if not turns or not sync_agent_types:
+    if not turns or not agent_types:
         return 0
     last_turn = turns[-1]
     if not last_turn.messages:
         return 0
-    # tool_use_id → name 映射:用 tool_use.name 配对 sync agent 类型。
-    tu_name_by_id: dict[str, str] = {
-        b.id: b.name
-        for m in last_turn.messages
-        for b in m.content
-        if isinstance(b, ToolUseBlock)
+    tu_by_id: dict[str, ToolUseBlock] = {
+        b.id: b for m in last_turn.messages for b in m.content if isinstance(b, ToolUseBlock)
     }
     changed = 0
     for m in last_turn.messages:
@@ -507,57 +514,53 @@ def _mark_pending_sync_agent_tooluses(
         for b in m.content:
             if not isinstance(b, ToolResultBlock):
                 continue
-            name = tu_name_by_id.get(b.tool_use_id)
-            if name is not None and name in sync_agent_types:
+            tu = tu_by_id.get(b.tool_use_id)
+            if tu is None or tu.agent_id is not None:
+                continue  # 新会话(tu.agent_id):repair 已补续跑提示,不覆盖
+            if tu.name in agent_types:
                 b.content = _SYNC_PENDING_PLACEHOLDER
                 changed += 1
     if changed:
         log.info(
-            "sync-agent 占位:%d 个待续跑 tool_use 的合成 tool_result 改为占位文案", changed,
+            "sync-agent 占位:%d 个待续跑 tool_use 的合成 tool_result 改为占位文案",
+            changed,
         )
     return changed
 
 
 def find_pending_notifications(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """识别 pending 的异步子 agent 完成通知(resume 规则)。
+    """识别 pending 的异步子 agent 完成通知(resume 规则):enqueue 后无匹配的 notification
+    投递或 dequeue/remove 结案 → pending,resume 时补投。
 
-    pending = queue-operation(operation=enqueue) 且无匹配 agentId 的【注入 user 行
-    或 dequeue/remove】(resolved)。resume 时对这些重新注入模型上下文。坏行(非 dict /
-    缺 agentId 的 enqueue)安全跳过——返回项必带 truthy agentId,调用方 obj["agentId"] 安全。
-
-    把 dequeue(消费标记)/ remove(取消)也并入 resolved —— 否则已消费/取消的 enqueue
-    仍被当 pending,在 resume 时误重构(重复注入)。find_unresponded_notifications 处理
-    「已投递未响应」轴,与本函数(投递补全轴)正交。
-
-    injected/resolved 均为全局集合(非「后续 enqueue」):靠 agentId 每 spawn 唯一保证等价;
-    若未来放宽 agentId 复用,需改为顺序扫描。
+    按行序 per-agentId FIFO 配对:enqueue 入待投递队列;notification user 行 / dequeue / remove
+    消费队首。支持 resume 复用 agent_id(同 agentId 跨周期:周期1 的 notification/dequeue 不掩
+    周期2 的 pending enqueue)——取代旧的全局 injected/resolved 集合(依赖 agentId 每 spawn
+    唯一假设;resume 复用 agent_id 时旧周期的 notification/dequeue 会被计入新周期,误判 pending
+    enqueue 已 resolved 而漏补投)。find_unresponded_notifications 处理「已投递未响应」轴,
+    与本函数(投递补全轴)正交。坏行(非 dict / 缺 agentId 的 enqueue)安全跳过——返回项必带
+    truthy agentId,调用方 obj["agentId"] 安全。
     """
-    injected_agent_ids: set[str] = {
-        obj["agentId"]
-        for obj in rows
-        if isinstance(obj, dict)
-        and obj.get("type") == "user"
-        and obj.get("isTaskNotification")
-        and obj.get("agentId")
-    }
-    resolved_agent_ids: set[str] = {
-        obj["agentId"]
-        for obj in rows
-        if isinstance(obj, dict)
-        and obj.get("type") == "queue-operation"
-        and obj.get("operation") in ("dequeue", "remove")
-        and obj.get("agentId")
-    }
-    return [
-        obj
-        for obj in rows
-        if isinstance(obj, dict)
-        and obj.get("type") == "queue-operation"
-        and obj.get("operation") == "enqueue"
-        and obj.get("agentId")  # 过滤坏行(缺/None agentId):docstring 承诺「安全跳过」
-        and obj.get("agentId") not in injected_agent_ids
-        and obj.get("agentId") not in resolved_agent_ids
-    ]
+    pending: dict[str, list[dict[str, Any]]] = {}
+    for obj in rows:
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") == "queue-operation":
+            aid = obj.get("agentId")
+            if not aid:
+                continue
+            op = obj.get("operation")
+            if op == "enqueue":
+                pending.setdefault(aid, []).append(obj)
+            elif op in ("dequeue", "remove"):
+                queue = pending.get(aid)
+                if queue:
+                    queue.pop(0)  # 直接结案(消费队首);多余 dequeue(无 pending)忽略
+            continue
+        if obj.get("type") == "user" and obj.get("isTaskNotification") and obj.get("agentId"):
+            queue = pending.get(obj["agentId"])
+            if queue:
+                queue.pop(0)  # notification 投递 → 消费对应 enqueue
+    return [obj for queue in pending.values() for obj in queue]
 
 
 # ---- Phase2: find_unresponded_notifications(已投递但未消费)----
@@ -575,52 +578,47 @@ class UnrespondedNotification:
 def find_unresponded_notifications(rows: list[dict[str, Any]]) -> list[UnrespondedNotification]:
     """已投递(isTaskNotification user 行)但无匹配 dequeue 的通知 → 待主 agent 响应。
 
-    与 find_pending_notifications(投递补全:enqueue 无 user 行)拆清两轴:
-    - find_pending:crash 在 enqueue↔user 行之间,补投。
-    - find_unresponded:已投递但主 agent 未响应(consume 标记 = dequeue)。
-    统一运行时 wake 与 resume 重注入(两条路都调它)。status 取自同 agentId 的 enqueue 行
-    (dequeue 复用,QueueOperationLine.status 必填)。
+    按行序 per-agentId FIFO 配对:notification user 行投递入待响应队列,dequeue/remove
+    消费队首。status 取自同 agentId 最近一次 enqueue 行(dequeue 复用,QueueOperationLine
+    .status 必填)。统一运行时 wake 与 resume 重注入(两条路都调它)。
+
+    支持 resume 复用 agent_id(同 agentId 跨周期:周期1 的 dequeue 不掩周期2 的 notification)
+    ——取代旧的全局 resolved 集合(它依赖"agentId 每 spawn 唯一"假设;resume 复用 agent_id
+    时旧周期的 dequeue 会被计入新周期,误掩 notification → _process_wake 不消费、悬空、
+    UI 进度卡不更新;见 21257de4)。
     """
-    # 已消费/已取消的 agentId:dequeue(消费标记)或 remove(取消)。
-    # 与 find_pending_notifications 的 resolved 集合对齐(两者都算 resolved)。
-    resolved = {
-        obj["agentId"]
-        for obj in rows
-        if isinstance(obj, dict)
-        and obj.get("type") == "queue-operation"
-        and obj.get("operation") in ("dequeue", "remove")
-        and obj.get("agentId")
-    }
-    enqueue_status: dict[str, str] = {
-        # `or "completed"` 兜底:status 显式为 null(坏数据/老会话)时不穿透 None(违 status:str 契约)
-        obj["agentId"]: obj.get("status") or "completed"
-        for obj in rows
-        if isinstance(obj, dict)
-        and obj.get("type") == "queue-operation"
-        and obj.get("operation") == "enqueue"
-        and obj.get("agentId")
-    }
-    out: list[UnrespondedNotification] = []
+    pending: dict[str, list[UnrespondedNotification]] = {}
+    enqueue_status: dict[str, str] = {}
     for obj in rows:
-        if not (
-            isinstance(obj, dict)
-            and obj.get("type") == "user"
-            and obj.get("isTaskNotification")
-            and obj.get("agentId")
-            and obj["agentId"] not in resolved
-        ):
+        if not isinstance(obj, dict):
             continue
+        if obj.get("type") == "queue-operation":
+            aid = obj.get("agentId")
+            if not aid:
+                continue
+            op = obj.get("operation")
+            if op == "enqueue":
+                # `or "completed"` 兜底:status 显式 null(坏数据/老会话)时不穿透 None。
+                enqueue_status[aid] = obj.get("status") or "completed"
+            elif op in ("dequeue", "remove"):
+                queue = pending.get(aid)
+                if queue:
+                    queue.pop(0)  # 消费队首(FIFO 配对);多余 dequeue(无待响应)忽略
+            continue
+        if not (obj.get("type") == "user" and obj.get("isTaskNotification") and obj.get("agentId")):
+            continue
+        aid = obj["agentId"]
         msg = _line_to_message(obj)
         if msg is None:
             continue
-        out.append(
+        pending.setdefault(aid, []).append(
             UnrespondedNotification(
-                agent_id=obj["agentId"],
-                status=enqueue_status.get(obj["agentId"], "completed"),
+                agent_id=aid,
+                status=enqueue_status.get(aid, "completed"),
                 message=msg,
             )
         )
-    return out
+    return [n for queue in pending.values() for n in queue]
 
 
 # ---- 子 agent 侧链续跑:保守 error 文案 + 侧链加载 ----
@@ -678,7 +676,5 @@ def load_sidechain_turns(sidechain_path: Path) -> list[Turn]:
     turns = decode_lines(rows)
     repair_trailing_edge(turns, error_message_fn=conservative_sidechain_error_message)
     if not turns and raw_rows:
-        log.warning(
-            "load_sidechain_turns: 侧链 jsonl 非空但 turns 为空,疑似加载截断(#15837 防御)"
-        )
+        log.warning("load_sidechain_turns: 侧链 jsonl 非空但 turns 为空,疑似加载截断(#15837 防御)")
     return turns

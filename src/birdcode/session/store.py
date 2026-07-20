@@ -3,6 +3,7 @@
 
 uuid 链状态封装在 store 内部(_last_uuid):append 自动挂链,load 设为叶子。
 """
+
 from __future__ import annotations
 
 import json
@@ -13,7 +14,7 @@ from typing import IO, TYPE_CHECKING, Any
 from birdcode.blocks import TextBlock
 from birdcode.conversation import Message, Turn
 from birdcode.session import codec, paths
-from birdcode.session.jsonutil import read_json_dict
+from birdcode.session.jsonutil import read_json_dict, write_json_atomic
 from birdcode.session.models import PersistInfo, SessionContext, SessionSummary
 from birdcode.session.timeutil import utc_iso
 from birdcode.utils.logging import get_logger
@@ -90,11 +91,7 @@ def _count_first_user_and_turns_from_rows(rows: list[dict[str, Any]]) -> tuple[s
     for obj in rows:
         if not isinstance(obj, dict) or obj.get("type") != "user":
             continue
-        if (
-            obj.get("isSidechain")
-            or obj.get("isTaskNotification")
-            or obj.get("isCompactSummary")
-        ):
+        if obj.get("isSidechain") or obj.get("isTaskNotification") or obj.get("isCompactSummary"):
             continue
         message = obj.get("message")
         if not isinstance(message, dict):
@@ -103,8 +100,7 @@ def _count_first_user_and_turns_from_rows(rows: list[dict[str, Any]]) -> tuple[s
         if not isinstance(content, list):
             continue  # content=null/非列表(坏行):防御(对齐旧 message_from_dict)
         has_text = any(
-            isinstance(b, dict) and b.get("type") == "text" and b.get("text")
-            for b in content
+            isinstance(b, dict) and b.get("type") == "text" and b.get("text") for b in content
         )
         if not has_text:
             continue
@@ -145,7 +141,7 @@ def _read_or_backfill_meta(jf: Path) -> tuple[str, int]:
             payload = json.dumps(
                 {"first_user": first_user, "turn_count": turn_count}, ensure_ascii=False
             )
-            _meta_path(jf).write_text(payload, encoding="utf-8")
+            write_json_atomic(_meta_path(jf), payload)
         except OSError:
             log.debug("backfill meta 写失败(返回值仍正确,下次再试)", exc_info=True)
         return first_user, turn_count
@@ -211,9 +207,7 @@ class SessionStore:
 
     def _purge_empty_sessions(self) -> None:
         """清扫本项目会话目录下的 0kb jsonl(遗留空会话)。best-effort,失败只 log。"""
-        d = paths.sessions_dir(
-            self._root, self._project_root, worktree_name=self._worktree_name
-        )
+        d = paths.sessions_dir(self._root, self._project_root, worktree_name=self._worktree_name)
         if not d.exists():
             return
         try:
@@ -305,15 +299,25 @@ class SessionStore:
         timestamp = utc_iso()
         if is_assistant:
             line = codec.encode_assistant(
-                msg, uuid=new_uuid, parent_uuid=parent_uuid, ctx=self._ctx,
-                timestamp=timestamp, usage=usage, stop_reason=stop_reason,
+                msg,
+                uuid=new_uuid,
+                parent_uuid=parent_uuid,
+                ctx=self._ctx,
+                timestamp=timestamp,
+                usage=usage,
+                stop_reason=stop_reason,
             )
         else:
             line = codec.encode_user(
-                msg, uuid=new_uuid, parent_uuid=parent_uuid, ctx=self._ctx,
-                timestamp=timestamp, tool_use_results=tool_use_results,
+                msg,
+                uuid=new_uuid,
+                parent_uuid=parent_uuid,
+                ctx=self._ctx,
+                timestamp=timestamp,
+                tool_use_results=tool_use_results,
                 source_tool_assistant_uuid=source_tool_assistant_uuid,
-                is_task_notification=is_task_notification, agent_id=agent_id,
+                is_task_notification=is_task_notification,
+                agent_id=agent_id,
             )
         if not write_jsonl_line(self._fh, line, label="session append"):
             return new_uuid
@@ -343,8 +347,11 @@ class SessionStore:
         timestamp = utc_iso()
         try:
             line = codec.encode_queue_operation(
-                ctx=self._ctx, timestamp=timestamp,
-                operation=operation, agent_id=agent_id, tool_use_id=tool_use_id,
+                ctx=self._ctx,
+                timestamp=timestamp,
+                operation=operation,
+                agent_id=agent_id,
+                tool_use_id=tool_use_id,
                 status=status,
             )
         except ValueError:
@@ -371,9 +378,14 @@ class SessionStore:
         new_uuid = str(_uuid.uuid4())
         timestamp = utc_iso()
         line = codec.encode_system_compact(
-            subtype=subtype, uuid=new_uuid, parent_uuid=None, ctx=self._ctx,
-            timestamp=timestamp, logical_parent_uuid=logical_parent_uuid,
-            content=content, compact_metadata=compact_metadata,
+            subtype=subtype,
+            uuid=new_uuid,
+            parent_uuid=None,
+            ctx=self._ctx,
+            timestamp=timestamp,
+            logical_parent_uuid=logical_parent_uuid,
+            content=content,
+            compact_metadata=compact_metadata,
         )
         if not write_jsonl_line(self._fh, line, label="append_system_compact"):
             return new_uuid
@@ -390,7 +402,11 @@ class SessionStore:
         parent_uuid = self._last_uuid  # = 刚 append 的边界行 uuid
         timestamp = utc_iso()
         line = codec.encode_user(
-            msg, uuid=new_uuid, parent_uuid=parent_uuid, ctx=self._ctx, timestamp=timestamp,
+            msg,
+            uuid=new_uuid,
+            parent_uuid=parent_uuid,
+            ctx=self._ctx,
+            timestamp=timestamp,
         )
         line["isCompactSummary"] = True
         if not write_jsonl_line(self._fh, line, label="append_compact_summary"):
@@ -426,12 +442,20 @@ class SessionStore:
         summary_uuid = str(_uuid.uuid4())
         timestamp = utc_iso()
         boundary_line = codec.encode_system_compact(
-            subtype=subtype, uuid=boundary_uuid, parent_uuid=None, ctx=self._ctx,
-            timestamp=timestamp, logical_parent_uuid=logical_parent_uuid,
-            content=content, compact_metadata=compact_metadata,
+            subtype=subtype,
+            uuid=boundary_uuid,
+            parent_uuid=None,
+            ctx=self._ctx,
+            timestamp=timestamp,
+            logical_parent_uuid=logical_parent_uuid,
+            content=content,
+            compact_metadata=compact_metadata,
         )
         summary_line = codec.encode_user(
-            summary_msg, uuid=summary_uuid, parent_uuid=boundary_uuid, ctx=self._ctx,
+            summary_msg,
+            uuid=summary_uuid,
+            parent_uuid=boundary_uuid,
+            ctx=self._ctx,
             timestamp=timestamp,
         )
         summary_line["isCompactSummary"] = True
@@ -446,13 +470,20 @@ class SessionStore:
                 row_uuid = str(_uuid.uuid4())
                 if msg.role == "assistant":
                     line = codec.encode_assistant(
-                        msg, uuid=row_uuid, parent_uuid=prev_uuid, ctx=self._ctx,
-                        timestamp=timestamp, usage=(turn.usage if i == last_asst_idx else None),
+                        msg,
+                        uuid=row_uuid,
+                        parent_uuid=prev_uuid,
+                        ctx=self._ctx,
+                        timestamp=timestamp,
+                        usage=(turn.usage if i == last_asst_idx else None),
                     )
                 else:
                     line = codec.encode_user(
-                        msg, uuid=row_uuid, parent_uuid=prev_uuid,
-                        ctx=self._ctx, timestamp=timestamp,
+                        msg,
+                        uuid=row_uuid,
+                        parent_uuid=prev_uuid,
+                        ctx=self._ctx,
+                        timestamp=timestamp,
                     )
                 lines.append(line)
                 prev_uuid = row_uuid
@@ -480,9 +511,7 @@ class SessionStore:
             data["first_user"] = text[:_FIRST_USER_MAX]
         data["turn_count"] = int(data.get("turn_count", 0)) + 1
         try:
-            _meta_path(self._jsonl).write_text(
-                json.dumps(data, ensure_ascii=False), encoding="utf-8"
-            )
+            write_json_atomic(_meta_path(self._jsonl), json.dumps(data, ensure_ascii=False))
         except OSError:
             log.debug("sidecar meta 写失败(不影响 jsonl)", exc_info=True)
 
@@ -539,26 +568,22 @@ class SessionStore:
         return turns
 
     def _pending_sync_agent_types(self) -> set[str]:
-        """当前会话【非终态 sync 子 agent】的 agent_type 集合(供 sync 占位配对)。
+        """非终态 sync 子 agent 的 agent_type 集合(旧会话 name fallback 占位配对)。
 
-        复用 agents.discover.find_resumable_subagents(状态非终态 ∪ cancelled),再过滤
-        is_async=False(sync)。函数级 import:避免会话层模块加载期反向依赖 agents 层。
-        无 subagents 目录 /无非终态 sync meta → 空集(占位短路,零影响)。
-
-        配对依据:主会话 sync agent tool_use 的 id 是 LLM 生成,无法直联 agent_id;
-        但 tool_use.name == meta.agent_type(_AgentTool 以 defn.name 注册),故按类型名配对。
+        新会话 agent tool 的续跑提示由 repair 读 tu.agent_id 直接补(带 agent_id);本方法
+        仅服务旧会话(tool_use 无 agent_id → name 配对)。复用 find_resumable_subagents
+        (状态非终态 ∪ cancelled),过滤 is_async=False。函数级 import 避免会话层加载期反向
+        依赖 agents 层。无非终态 sync meta → 空集(占位短路)。
         """
         from birdcode.agents.discover import find_resumable_subagents
 
         sub_dir = paths.subagents_dir(
-            self._root, self._ctx.session_id, self._project_root,
+            self._root,
+            self._ctx.session_id,
+            self._project_root,
             worktree_name=self._worktree_name,
         )
-        return {
-            m.agent_type
-            for m in find_resumable_subagents(sub_dir)
-            if not m.is_async
-        }
+        return {m.agent_type for m in find_resumable_subagents(sub_dir) if not m.is_async}
 
     def _read_mainline_rows(self) -> list[dict[str, Any]]:
         """读 jsonl 主线行:跳过空/坏 JSON/非 dict/isSidechain 行。"""
@@ -594,7 +619,10 @@ class SessionStore:
 
     @staticmethod
     def list_sessions(
-        root: Path, project_root: Path, *, worktree_name: str | None = None,
+        root: Path,
+        project_root: Path,
+        *,
+        worktree_name: str | None = None,
     ) -> list[SessionSummary]:
         """列 encoded-cwd 目录下所有非空 .jsonl,按 mtime 倒序。
 

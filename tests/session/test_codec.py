@@ -31,6 +31,26 @@ def test_block_roundtrip_tool_use_input_preserved():
     assert back.id == "c1" and back.input == {"file_path": "x.py", "n": 3}
 
 
+def test_block_roundtrip_tool_use_agent_id_persisted():
+    """agent_id 持久化字段:block_to_dict 写、block_from_dict 读(仅 jsonl,不进 API)。"""
+    block = ToolUseBlock(id="c1", name="explore", input={"prompt": "x"}, agent_id="sub-abc123")
+    d = codec.block_to_dict(block)
+    assert d["agent_id"] == "sub-abc123"
+    back = codec.block_from_dict(d)
+    assert isinstance(back, ToolUseBlock)
+    assert back.agent_id == "sub-abc123"
+
+
+def test_block_roundtrip_tool_use_without_agent_id_omits_field():
+    """agent_id=None(普通 tool_use)不写 agent_id 字段,避免 jsonl 噪声。"""
+    block = ToolUseBlock(id="c1", name="read_file", input={})
+    d = codec.block_to_dict(block)
+    assert "agent_id" not in d
+    back = codec.block_from_dict(d)
+    assert isinstance(back, ToolUseBlock)
+    assert back.agent_id is None
+
+
 def test_block_roundtrip_tool_result_is_error_and_placeholder_content():
     """占位文本(超阈时)作为 content 原样往返。"""
     placeholder = "<persisted-output>\nOutput too large...\n"
@@ -52,7 +72,11 @@ def test_message_roundtrip_user():
 def test_encode_user_camel_case_fields():
     msg = Message(role="user", content=[TextBlock(text="hi")])
     line = codec.encode_user(
-        msg, uuid="u1", parent_uuid=None, ctx=_ctx(), timestamp="2026-07-05T00:00:00Z",
+        msg,
+        uuid="u1",
+        parent_uuid=None,
+        ctx=_ctx(),
+        timestamp="2026-07-05T00:00:00Z",
     )
     assert line["type"] == "user"
     assert line["parentUuid"] is None
@@ -68,8 +92,13 @@ def test_encode_assistant_includes_usage_and_stop_reason():
     msg = Message(role="assistant", content=[TextBlock(text="ok")])
     usage = TokenUsage(input_tokens=10, output_tokens=5)
     line = codec.encode_assistant(
-        msg, uuid="a1", parent_uuid="u1", ctx=_ctx(), timestamp="t",
-        usage=usage, stop_reason="end_turn",
+        msg,
+        uuid="a1",
+        parent_uuid="u1",
+        ctx=_ctx(),
+        timestamp="t",
+        usage=usage,
+        stop_reason="end_turn",
     )
     assert line["type"] == "assistant"
     assert line["message"]["usage"]["input_tokens"] == 10
@@ -79,21 +108,37 @@ def test_encode_assistant_includes_usage_and_stop_reason():
 def test_decode_lines_to_turns_single_turn():
     """user(提问) → assistant → user(tool_result) → assistant(终) 归一个 Turn。"""
     lines = [
-        codec.encode_user(Message(role="user", content=[TextBlock(text="问")]),
-                           uuid="u1", parent_uuid=None, ctx=_ctx(), timestamp="t1"),
+        codec.encode_user(
+            Message(role="user", content=[TextBlock(text="问")]),
+            uuid="u1",
+            parent_uuid=None,
+            ctx=_ctx(),
+            timestamp="t1",
+        ),
         codec.encode_assistant(
             Message(
                 role="assistant",
                 content=[ToolUseBlock(id="c1", name="echo", input={"text": "问"})],
             ),
-            uuid="a1", parent_uuid="u1", ctx=_ctx(), timestamp="t2",
+            uuid="a1",
+            parent_uuid="u1",
+            ctx=_ctx(),
+            timestamp="t2",
         ),
         codec.encode_user(
             Message(role="user", content=[ToolResultBlock(tool_use_id="c1", content="问")]),
-            uuid="u2", parent_uuid="a1", ctx=_ctx(), timestamp="t3",
+            uuid="u2",
+            parent_uuid="a1",
+            ctx=_ctx(),
+            timestamp="t3",
         ),
-        codec.encode_assistant(Message(role="assistant", content=[TextBlock(text="答")]),
-                               uuid="a2", parent_uuid="u2", ctx=_ctx(), timestamp="t4"),
+        codec.encode_assistant(
+            Message(role="assistant", content=[TextBlock(text="答")]),
+            uuid="a2",
+            parent_uuid="u2",
+            ctx=_ctx(),
+            timestamp="t4",
+        ),
     ]
     turns = codec.decode_lines_to_turns(lines)
     assert len(turns) == 1
@@ -104,14 +149,34 @@ def test_decode_lines_to_turns_single_turn():
 def test_decode_lines_to_turns_multiple_turns_boundary():
     """第二个含 TextBlock 的 user 行 = 新 Turn 边界。"""
     lines = [
-        codec.encode_user(Message(role="user", content=[TextBlock(text="第一问")]),
-                           uuid="u1", parent_uuid=None, ctx=_ctx(), timestamp="t1"),
-        codec.encode_assistant(Message(role="assistant", content=[TextBlock(text="第一答")]),
-                               uuid="a1", parent_uuid="u1", ctx=_ctx(), timestamp="t2"),
-        codec.encode_user(Message(role="user", content=[TextBlock(text="第二问")]),
-                           uuid="u2", parent_uuid="a1", ctx=_ctx(), timestamp="t3"),
-        codec.encode_assistant(Message(role="assistant", content=[TextBlock(text="第二答")]),
-                               uuid="a2", parent_uuid="u2", ctx=_ctx(), timestamp="t4"),
+        codec.encode_user(
+            Message(role="user", content=[TextBlock(text="第一问")]),
+            uuid="u1",
+            parent_uuid=None,
+            ctx=_ctx(),
+            timestamp="t1",
+        ),
+        codec.encode_assistant(
+            Message(role="assistant", content=[TextBlock(text="第一答")]),
+            uuid="a1",
+            parent_uuid="u1",
+            ctx=_ctx(),
+            timestamp="t2",
+        ),
+        codec.encode_user(
+            Message(role="user", content=[TextBlock(text="第二问")]),
+            uuid="u2",
+            parent_uuid="a1",
+            ctx=_ctx(),
+            timestamp="t3",
+        ),
+        codec.encode_assistant(
+            Message(role="assistant", content=[TextBlock(text="第二答")]),
+            uuid="a2",
+            parent_uuid="u2",
+            ctx=_ctx(),
+            timestamp="t4",
+        ),
     ]
     turns = codec.decode_lines_to_turns(lines)
     assert len(turns) == 2
@@ -123,11 +188,22 @@ def test_decode_lines_to_turns_sets_usage_from_last_assistant():
     from birdcode.agent.provider import TokenUsage
 
     lines = [
-        codec.encode_user(Message(role="user", content=[TextBlock(text="问")]),
-                           uuid="u1", parent_uuid=None, ctx=_ctx(), timestamp="t1"),
-        codec.encode_assistant(Message(role="assistant", content=[TextBlock(text="答")]),
-                               uuid="a1", parent_uuid="u1", ctx=_ctx(), timestamp="t2",
-                               usage=TokenUsage(input_tokens=7), stop_reason="end_turn"),
+        codec.encode_user(
+            Message(role="user", content=[TextBlock(text="问")]),
+            uuid="u1",
+            parent_uuid=None,
+            ctx=_ctx(),
+            timestamp="t1",
+        ),
+        codec.encode_assistant(
+            Message(role="assistant", content=[TextBlock(text="答")]),
+            uuid="a1",
+            parent_uuid="u1",
+            ctx=_ctx(),
+            timestamp="t2",
+            usage=TokenUsage(input_tokens=7),
+            stop_reason="end_turn",
+        ),
     ]
     turns = codec.decode_lines_to_turns(lines)
     assert turns[0].usage is not None and turns[0].usage.input_tokens == 7
@@ -203,11 +279,17 @@ def test_decode_lines_to_turns_tolerates_usage_extra_fields():
     lines = [
         codec.encode_user(
             Message(role="user", content=[TextBlock(text="问")]),
-            uuid="u1", parent_uuid=None, ctx=_ctx(), timestamp="t1",
+            uuid="u1",
+            parent_uuid=None,
+            ctx=_ctx(),
+            timestamp="t1",
         ),
         codec.encode_assistant(
             Message(role="assistant", content=[TextBlock(text="答")]),
-            uuid="a1", parent_uuid="u1", ctx=_ctx(), timestamp="t2",
+            uuid="a1",
+            parent_uuid="u1",
+            ctx=_ctx(),
+            timestamp="t2",
         ),
     ]
     # 注入未来字段(schema drift)
@@ -233,16 +315,25 @@ def test_decode_completes_trailing_orphan_user_question():
     lines = [
         codec.encode_user(
             Message(role="user", content=[TextBlock(text="第一问")]),
-            uuid="u1", parent_uuid=None, ctx=_ctx(), timestamp="t1",
+            uuid="u1",
+            parent_uuid=None,
+            ctx=_ctx(),
+            timestamp="t1",
         ),
         codec.encode_assistant(
             Message(role="assistant", content=[TextBlock(text="第一答")]),
-            uuid="a1", parent_uuid="u1", ctx=_ctx(), timestamp="t2",
+            uuid="a1",
+            parent_uuid="u1",
+            ctx=_ctx(),
+            timestamp="t2",
         ),
         # orphan user 提问(无 assistant 跟随)
         codec.encode_user(
             Message(role="user", content=[TextBlock(text="第二问")]),
-            uuid="u2", parent_uuid="a1", ctx=_ctx(), timestamp="t3",
+            uuid="u2",
+            parent_uuid="a1",
+            ctx=_ctx(),
+            timestamp="t3",
         ),
     ]
     turns = codec.decode_lines_to_turns(lines)
@@ -261,15 +352,24 @@ def test_decode_completes_trailing_tool_result_user():
     lines = [
         codec.encode_user(
             Message(role="user", content=[TextBlock(text="问")]),
-            uuid="u1", parent_uuid=None, ctx=_ctx(), timestamp="t1",
+            uuid="u1",
+            parent_uuid=None,
+            ctx=_ctx(),
+            timestamp="t1",
         ),
         codec.encode_assistant(
             Message(role="assistant", content=[ToolUseBlock(id="c1", name="echo", input={})]),
-            uuid="a1", parent_uuid="u1", ctx=_ctx(), timestamp="t2",
+            uuid="a1",
+            parent_uuid="u1",
+            ctx=_ctx(),
+            timestamp="t2",
         ),
         codec.encode_user(
             Message(role="user", content=[ToolResultBlock(tool_use_id="c1", content="ok")]),
-            uuid="u2", parent_uuid="a1", ctx=_ctx(), timestamp="t3",
+            uuid="u2",
+            parent_uuid="a1",
+            ctx=_ctx(),
+            timestamp="t3",
         ),
     ]
     turns = codec.decode_lines_to_turns(lines)
@@ -291,11 +391,17 @@ def test_decode_repairs_dangling_tool_use_with_error_result():
     lines = [
         codec.encode_user(
             Message(role="user", content=[TextBlock(text="问")]),
-            uuid="u1", parent_uuid=None, ctx=_ctx(), timestamp="t1",
+            uuid="u1",
+            parent_uuid=None,
+            ctx=_ctx(),
+            timestamp="t1",
         ),
         codec.encode_assistant(
             Message(role="assistant", content=[ToolUseBlock(id="c1", name="echo", input={})]),
-            uuid="a1", parent_uuid="u1", ctx=_ctx(), timestamp="t2",
+            uuid="a1",
+            parent_uuid="u1",
+            ctx=_ctx(),
+            timestamp="t2",
         ),
         # 没有 tool_result 行(进程在工具执行中崩溃)
     ]
@@ -317,19 +423,31 @@ def test_decode_no_repair_when_tool_use_already_paired():
     lines = [
         codec.encode_user(
             Message(role="user", content=[TextBlock(text="问")]),
-            uuid="u1", parent_uuid=None, ctx=_ctx(), timestamp="t1",
+            uuid="u1",
+            parent_uuid=None,
+            ctx=_ctx(),
+            timestamp="t1",
         ),
         codec.encode_assistant(
             Message(role="assistant", content=[ToolUseBlock(id="c1", name="echo", input={})]),
-            uuid="a1", parent_uuid="u1", ctx=_ctx(), timestamp="t2",
+            uuid="a1",
+            parent_uuid="u1",
+            ctx=_ctx(),
+            timestamp="t2",
         ),
         codec.encode_user(
             Message(role="user", content=[ToolResultBlock(tool_use_id="c1", content="ok")]),
-            uuid="u2", parent_uuid="a1", ctx=_ctx(), timestamp="t3",
+            uuid="u2",
+            parent_uuid="a1",
+            ctx=_ctx(),
+            timestamp="t3",
         ),
         codec.encode_assistant(
             Message(role="assistant", content=[TextBlock(text="答")]),
-            uuid="a2", parent_uuid="u2", ctx=_ctx(), timestamp="t4",
+            uuid="a2",
+            parent_uuid="u2",
+            ctx=_ctx(),
+            timestamp="t4",
         ),
     ]
     turns = codec.decode_lines_to_turns(lines)
@@ -353,11 +471,17 @@ def test_repair_trailing_edge_ends_with_assistant():
     lines_a = [
         codec.encode_user(
             Message(role="user", content=[TextBlock(text="q")]),
-            uuid="u", parent_uuid=None, ctx=_ctx(), timestamp="t",
+            uuid="u",
+            parent_uuid=None,
+            ctx=_ctx(),
+            timestamp="t",
         ),
         codec.encode_assistant(
             Message(role="assistant", content=[ToolUseBlock(id="c", name="echo", input={})]),
-            uuid="a", parent_uuid="u", ctx=_ctx(), timestamp="t",
+            uuid="a",
+            parent_uuid="u",
+            ctx=_ctx(),
+            timestamp="t",
         ),
     ]
     turns_a = codec.decode_lines_to_turns(lines_a)
@@ -367,7 +491,10 @@ def test_repair_trailing_edge_ends_with_assistant():
     lines_b = [
         codec.encode_user(
             Message(role="user", content=[TextBlock(text="q")]),
-            uuid="u", parent_uuid=None, ctx=_ctx(), timestamp="t",
+            uuid="u",
+            parent_uuid=None,
+            ctx=_ctx(),
+            timestamp="t",
         ),
     ]
     turns_b = codec.decode_lines_to_turns(lines_b)
@@ -377,11 +504,17 @@ def test_repair_trailing_edge_ends_with_assistant():
     lines_c = [
         codec.encode_user(
             Message(role="user", content=[TextBlock(text="q")]),
-            uuid="u", parent_uuid=None, ctx=_ctx(), timestamp="t",
+            uuid="u",
+            parent_uuid=None,
+            ctx=_ctx(),
+            timestamp="t",
         ),
         codec.encode_assistant(
             Message(role="assistant", content=[TextBlock(text="a")]),
-            uuid="a", parent_uuid="u", ctx=_ctx(), timestamp="t",
+            uuid="a",
+            parent_uuid="u",
+            ctx=_ctx(),
+            timestamp="t",
         ),
     ]
     turns_c = codec.decode_lines_to_turns(lines_c)
@@ -397,11 +530,17 @@ def test_decode_skips_malformed_message_line():
     lines = [
         codec.encode_user(
             Message(role="user", content=[TextBlock(text="问")]),
-            uuid="u1", parent_uuid=None, ctx=_ctx(), timestamp="t1",
+            uuid="u1",
+            parent_uuid=None,
+            ctx=_ctx(),
+            timestamp="t1",
         ),
         codec.encode_assistant(
             Message(role="assistant", content=[TextBlock(text="答")]),
-            uuid="a1", parent_uuid="u1", ctx=_ctx(), timestamp="t2",
+            uuid="a1",
+            parent_uuid="u1",
+            ctx=_ctx(),
+            timestamp="t2",
         ),
         # 残缺:assistant 行的 text block 缺 text 字段
         {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text"}]}},
@@ -437,7 +576,10 @@ def test_synthetic_flag_roundtrip():
     # 普通消息 synthetic=False
     normal = codec.encode_user(
         Message(role="user", content=[TextBlock(text="hi")]),
-        uuid="u2", parent_uuid=None, ctx=_ctx(), timestamp="t",
+        uuid="u2",
+        parent_uuid=None,
+        ctx=_ctx(),
+        timestamp="t",
     )
     assert normal["synthetic"] is False
 
@@ -447,8 +589,11 @@ def test_encode_queue_operation_fields():
 
     ctx = SessionContext(session_id="s1", cwd="C:/p", version="0.1.0", git_branch="main")
     line = codec.encode_queue_operation(
-        ctx=ctx, timestamp="t",
-        operation="enqueue", agent_id="a1", tool_use_id="call_x",
+        ctx=ctx,
+        timestamp="t",
+        operation="enqueue",
+        agent_id="a1",
+        tool_use_id="call_x",
         status="completed",
     )
     assert line["type"] == "queue-operation"
@@ -463,7 +608,11 @@ def test_encode_user_tool_use_result_dict_by_id():
     """sync/async 结果行:顶层 toolUseResult = dict 按 tool_use_id 索引(兼容批处理)。"""
     msg = Message(role="user", content=[ToolResultBlock(tool_use_id="call_x", content="ok")])
     line = codec.encode_user(
-        msg, uuid="u1", parent_uuid="a1", ctx=_ctx(), timestamp="t",
+        msg,
+        uuid="u1",
+        parent_uuid="a1",
+        ctx=_ctx(),
+        timestamp="t",
         tool_use_results={"call_x": {"agentId": "a1", "status": "completed"}},
         source_tool_assistant_uuid="a1",
     )
@@ -475,8 +624,13 @@ def test_encode_user_task_notification_and_agent_id():
     """§4.4② 注入行:isTaskNotification=true + 顶层 agentId(供 resume 匹配 enqueue)。"""
     msg = Message(role="user", content=[TextBlock(text="<task-notification>x</task-notification>")])
     line = codec.encode_user(
-        msg, uuid="u1", parent_uuid="q1", ctx=_ctx(), timestamp="t",
-        is_task_notification=True, agent_id="a1",
+        msg,
+        uuid="u1",
+        parent_uuid="q1",
+        ctx=_ctx(),
+        timestamp="t",
+        is_task_notification=True,
+        agent_id="a1",
     )
     assert line["isTaskNotification"] is True
     assert line["agentId"] == "a1"
@@ -545,10 +699,22 @@ def test_find_pending_excludes_dequeued():
     from birdcode.session.codec import find_pending_notifications
 
     rows = [
-        {"type": "queue-operation", "operation": "enqueue", "agentId": "sub-1",
-         "toolUseId": "t1", "status": "completed", "content": "..."},
-        {"type": "queue-operation", "operation": "dequeue", "agentId": "sub-1",
-         "toolUseId": "t1", "status": "completed", "content": ""},
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "agentId": "sub-1",
+            "toolUseId": "t1",
+            "status": "completed",
+            "content": "...",
+        },
+        {
+            "type": "queue-operation",
+            "operation": "dequeue",
+            "agentId": "sub-1",
+            "toolUseId": "t1",
+            "status": "completed",
+            "content": "",
+        },
     ]
     assert find_pending_notifications(rows) == []  # enqueue 有 dequeue → resolved
 
@@ -558,10 +724,22 @@ def test_find_pending_excludes_removed():
     from birdcode.session.codec import find_pending_notifications
 
     rows = [
-        {"type": "queue-operation", "operation": "enqueue", "agentId": "sub-2",
-         "toolUseId": "t2", "status": "completed", "content": "..."},
-        {"type": "queue-operation", "operation": "remove", "agentId": "sub-2",
-         "toolUseId": "t2", "status": "cancelled", "content": ""},
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "agentId": "sub-2",
+            "toolUseId": "t2",
+            "status": "completed",
+            "content": "...",
+        },
+        {
+            "type": "queue-operation",
+            "operation": "remove",
+            "agentId": "sub-2",
+            "toolUseId": "t2",
+            "status": "cancelled",
+            "content": "",
+        },
     ]
     assert find_pending_notifications(rows) == []
 
@@ -571,14 +749,71 @@ def test_find_pending_dequeued_keeps_unmatched_enqueue():
     from birdcode.session.codec import find_pending_notifications
 
     rows = [
-        {"type": "queue-operation", "operation": "enqueue", "agentId": "sub-1",
-         "toolUseId": "t1", "status": "completed", "content": "..."},
-        {"type": "queue-operation", "operation": "dequeue", "agentId": "sub-9",
-         "toolUseId": "t9", "status": "completed", "content": ""},
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "agentId": "sub-1",
+            "toolUseId": "t1",
+            "status": "completed",
+            "content": "...",
+        },
+        {
+            "type": "queue-operation",
+            "operation": "dequeue",
+            "agentId": "sub-9",
+            "toolUseId": "t9",
+            "status": "completed",
+            "content": "",
+        },
     ]
     pending = find_pending_notifications(rows)
     assert len(pending) == 1
     assert pending[0]["agentId"] == "sub-1"
+
+
+def test_find_pending_resume_reused_agent_id():
+    """resume 复用 agent_id:周期1(enqueue+notification+dequeue)已结案,周期2 enqueue
+    crash 在 notification 投递前 → 周期2 enqueue 仍 pending 待补投。
+
+    regression:旧全局 injected 集合把周期1 notification 计入 → 周期2 enqueue 被误判已注入
+    而漏补投(同 find_unresponded 的 agentId 复用问题)。
+    """
+    from birdcode.session.codec import find_pending_notifications
+
+    rows = [
+        # 周期1:完整结案(enqueue→notification→dequeue)
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "agentId": "sub-x",
+            "status": "cancelled",
+            "toolUseId": "t1",
+        },
+        {
+            "type": "user",
+            "isTaskNotification": True,
+            "agentId": "sub-x",
+            "message": {"role": "user", "content": [{"type": "text", "text": "n1"}]},
+        },
+        {
+            "type": "queue-operation",
+            "operation": "dequeue",
+            "agentId": "sub-x",
+            "status": "cancelled",
+            "toolUseId": "",
+        },
+        # 周期2:enqueue 后 crash(notification 未投递)→ 应 pending 补投
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "agentId": "sub-x",
+            "status": "completed",
+            "toolUseId": "t2",
+        },
+    ]
+    pending = find_pending_notifications(rows)
+    assert len(pending) == 1
+    assert pending[0]["toolUseId"] == "t2"  # 周期2 enqueue,非周期1
 
 
 # ---- Phase2 F8: find_unresponded_notifications ----
@@ -589,12 +824,25 @@ def test_find_unresponded_notifications():
     from birdcode.session.codec import find_unresponded_notifications
 
     rows = [
-        {"type": "queue-operation", "operation": "enqueue", "agentId": "sub-1",
-         "toolUseId": "t1", "status": "completed", "content": "<task-notification>...A..."},
-        {"type": "user", "isTaskNotification": True, "agentId": "sub-1",
-         "message": {"role": "user", "content": [
-             {"type": "text", "text": "<task-notification>...A..."},
-         ]}},
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "agentId": "sub-1",
+            "toolUseId": "t1",
+            "status": "completed",
+            "content": "<task-notification>...A...",
+        },
+        {
+            "type": "user",
+            "isTaskNotification": True,
+            "agentId": "sub-1",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "<task-notification>...A..."},
+                ],
+            },
+        },
     ]
     out = find_unresponded_notifications(rows)
     assert len(out) == 1
@@ -608,14 +856,82 @@ def test_find_unresponded_excludes_dequeued():
     from birdcode.session.codec import find_unresponded_notifications
 
     rows = [
-        {"type": "queue-operation", "operation": "enqueue", "agentId": "sub-1",
-         "toolUseId": "t1", "status": "completed", "content": "..."},
-        {"type": "user", "isTaskNotification": True, "agentId": "sub-1",
-         "message": {"role": "user", "content": [{"type": "text", "text": "..."}]}},
-        {"type": "queue-operation", "operation": "dequeue", "agentId": "sub-1",
-         "toolUseId": "t1", "status": "completed", "content": ""},
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "agentId": "sub-1",
+            "toolUseId": "t1",
+            "status": "completed",
+            "content": "...",
+        },
+        {
+            "type": "user",
+            "isTaskNotification": True,
+            "agentId": "sub-1",
+            "message": {"role": "user", "content": [{"type": "text", "text": "..."}]},
+        },
+        {
+            "type": "queue-operation",
+            "operation": "dequeue",
+            "agentId": "sub-1",
+            "toolUseId": "t1",
+            "status": "completed",
+            "content": "",
+        },
     ]
     assert find_unresponded_notifications(rows) == []
+
+
+def test_find_unresponded_resume_reused_agent_id():
+    """resume 复用 agent_id:周期1(enqueue+notification+dequeue)的 dequeue 不掩周期2
+    (enqueue+notification 无 dequeue)的 notification。按行序 per-agentId FIFO 配对。
+
+    regression:旧全局 resolved 集合把周期1 dequeue 计入 → 周期2 notification 被误判已响应 →
+    resume 后 async 完成 notification 不被 _process_wake 消费、悬空、UI 进度卡不更新
+    (21257de4:两个 async 子 agent resume 完成后主 agent 不响应、卡住)。
+    """
+    from birdcode.session.codec import find_unresponded_notifications
+
+    rows = [
+        # 周期1:ESC cancelled(主 agent 已 dequeue 消费)
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "agentId": "sub-x",
+            "status": "cancelled",
+            "toolUseId": "t1",
+        },
+        {
+            "type": "user",
+            "isTaskNotification": True,
+            "agentId": "sub-x",
+            "message": {"role": "user", "content": [{"type": "text", "text": "notif-cancelled"}]},
+        },
+        {
+            "type": "queue-operation",
+            "operation": "dequeue",
+            "agentId": "sub-x",
+            "status": "cancelled",
+            "toolUseId": "",
+        },
+        # 周期2:resume completed(无 dequeue = 未响应)
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "agentId": "sub-x",
+            "status": "completed",
+            "toolUseId": "t2",
+        },
+        {
+            "type": "user",
+            "isTaskNotification": True,
+            "agentId": "sub-x",
+            "message": {"role": "user", "content": [{"type": "text", "text": "notif-completed"}]},
+        },
+    ]
+    out = find_unresponded_notifications(rows)
+    assert len(out) == 1  # 仅周期2(周期1 已被 dequeue 消费)
+    assert out[0].status == "completed"  # 取自周期2 enqueue,非周期1 cancelled
 
 
 # ---- #10: is_task_notification 回填到 Message(resume 重放据此跳过)----
@@ -642,8 +958,7 @@ def test_line_to_message_backfills_is_task_notification():
     assert msg.is_task_notification is True
     # 普通行(无 isTaskNotification)不带标记
     plain = _line_to_message(
-        {"type": "user",
-         "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}}
+        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}}
     )
     assert plain is not None
     assert plain.is_task_notification is False

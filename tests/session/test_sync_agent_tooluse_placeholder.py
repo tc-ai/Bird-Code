@@ -7,6 +7,7 @@ runner 内部 tool_use_id="(sync-agent)" 只进子 agent meta/queue-op,不进主
 靠【tool_use.name == 非终态 sync meta.agent_type】配对(sync 阻塞,同时刻仅一个),
 再由 codec._mark_pending_sync_agent_tooluses 改合成 tool_result 的 content。
 """
+
 from birdcode.blocks import TextBlock, ToolResultBlock, ToolUseBlock
 from birdcode.conversation import Message, Turn
 from birdcode.session import codec, paths
@@ -19,20 +20,29 @@ def _ctx(sid="s1"):
     return SessionContext(session_id=sid, cwd="C:/proj", version="0.1.0", git_branch="main")
 
 
-def _dangling_sync_agent_turns() -> list[Turn]:
+def _dangling_sync_agent_turns(agent_id: str | None = None) -> list[Turn]:
     """末尾 assistant 含 sync agent tool_use、无 result → repair 补合成 error tool_result。
 
+    agent_id:模拟新会话(落盘前 annotate 注入);None=旧会话(tool_use 无 agent_id)。
     tool_use.name='general-purpose'(默认 agent 类型,与 _AgentTool 注册名一致)。
     """
     turns = [
-        Turn(messages=[
-            Message(role="user", content=[TextBlock(text="go")]),
-            Message(
-                role="assistant",
-                content=[ToolUseBlock(id="toolu_1", name="general-purpose",
-                                      input={"prompt": "do x"})],
-            ),
-        ])
+        Turn(
+            messages=[
+                Message(role="user", content=[TextBlock(text="go")]),
+                Message(
+                    role="assistant",
+                    content=[
+                        ToolUseBlock(
+                            id="toolu_1",
+                            name="general-purpose",
+                            input={"prompt": "do x"},
+                            agent_id=agent_id,
+                        )
+                    ],
+                ),
+            ]
+        )
     ]
     codec.repair_trailing_edge(turns)
     return turns
@@ -40,7 +50,10 @@ def _dangling_sync_agent_turns() -> list[Turn]:
 
 def _find_tool_result(turns: list[Turn], tool_use_id: str) -> ToolResultBlock:
     return next(
-        b for t in turns for m in t.messages for b in m.content
+        b
+        for t in turns
+        for m in t.messages
+        for b in m.content
         if isinstance(b, ToolResultBlock) and b.tool_use_id == tool_use_id
     )
 
@@ -82,19 +95,22 @@ def test_mark_pending_noop_when_empty_types():
 def test_mark_pending_does_not_touch_non_synthetic_tool_results():
     """只改 synthetic=True 的 tool_result(repair 补的);真实 tool_result 不被动。"""
     turns = [
-        Turn(messages=[
-            Message(role="user", content=[TextBlock(text="go")]),
-            Message(
-                role="assistant",
-                content=[ToolUseBlock(id="toolu_1", name="general-purpose",
-                                      input={"prompt": "do x"})],
-            ),
-            # 真实 tool_result(synthetic=False)——不该被改
-            Message(
-                role="user",
-                content=[ToolResultBlock(tool_use_id="toolu_1", content="real result")],
-            ),
-        ])
+        Turn(
+            messages=[
+                Message(role="user", content=[TextBlock(text="go")]),
+                Message(
+                    role="assistant",
+                    content=[
+                        ToolUseBlock(id="toolu_1", name="general-purpose", input={"prompt": "do x"})
+                    ],
+                ),
+                # 真实 tool_result(synthetic=False)——不该被改
+                Message(
+                    role="user",
+                    content=[ToolResultBlock(tool_use_id="toolu_1", content="real result")],
+                ),
+            ]
+        )
     ]
     n = codec._mark_pending_sync_agent_tooluses(turns, {"general-purpose"})
     assert n == 0
@@ -112,8 +128,7 @@ async def test_load_mainline_marks_pending_sync_agent_when_meta_nonterminal(tmp_
     await store.append(
         Message(
             role="assistant",
-            content=[ToolUseBlock(id="toolu_1", name="general-purpose",
-                                  input={"prompt": "do x"})],
+            content=[ToolUseBlock(id="toolu_1", name="general-purpose", input={"prompt": "do x"})],
         ),
         is_assistant=True,
     )
@@ -122,8 +137,11 @@ async def test_load_mainline_marks_pending_sync_agent_when_meta_nonterminal(tmp_
     write_subagent_meta(
         paths.subagent_meta_path(tmp_path, "s1", tmp_path, "a9"),
         SubagentMeta(
-            agent_id="a9", agent_type="general-purpose", tool_use_id="(sync-agent)",
-            is_async=False, status="running",
+            agent_id="a9",
+            agent_type="general-purpose",
+            tool_use_id="(sync-agent)",
+            is_async=False,
+            status="running",
         ),
     )
     # resume:重开 store,load_mainline
@@ -141,8 +159,7 @@ async def test_load_mainline_keeps_default_when_no_pending_meta(tmp_path):
     await store.append(
         Message(
             role="assistant",
-            content=[ToolUseBlock(id="toolu_1", name="general-purpose",
-                                  input={"prompt": "do x"})],
+            content=[ToolUseBlock(id="toolu_1", name="general-purpose", input={"prompt": "do x"})],
         ),
         is_assistant=True,
     )
@@ -157,14 +174,17 @@ async def test_load_mainline_keeps_default_when_no_pending_meta(tmp_path):
 
 
 async def test_load_mainline_ignores_terminal_sync_meta(tmp_path):
-    """终态 meta(completed)不可续 → 不视为待续跑,content 保持默认。"""
+    """终态 meta(completed)但无侧链产出 → 不填回报告,content 保持 repair 默认。
+
+    _fill 需侧链像终态才填;此处无侧链 → reports 空 → 不命中。(有侧链报告的场景见
+    test_load_mainline_fills_completed_sync_report。)
+    """
     store = SessionStore(_ctx(), tmp_path, root=tmp_path)
     await store.append(Message(role="user", content=[TextBlock(text="go")]))
     await store.append(
         Message(
             role="assistant",
-            content=[ToolUseBlock(id="toolu_1", name="general-purpose",
-                                  input={"prompt": "do x"})],
+            content=[ToolUseBlock(id="toolu_1", name="general-purpose", input={"prompt": "do x"})],
         ),
         is_assistant=True,
     )
@@ -173,8 +193,11 @@ async def test_load_mainline_ignores_terminal_sync_meta(tmp_path):
     write_subagent_meta(
         paths.subagent_meta_path(tmp_path, "s1", tmp_path, "a9"),
         SubagentMeta(
-            agent_id="a9", agent_type="general-purpose", tool_use_id="(sync-agent)",
-            is_async=False, status="completed",
+            agent_id="a9",
+            agent_type="general-purpose",
+            tool_use_id="(sync-agent)",
+            is_async=False,
+            status="completed",
         ),
     )
     store2 = SessionStore(_ctx(), tmp_path, root=tmp_path)
@@ -192,8 +215,7 @@ async def test_load_mainline_ignores_async_pending_meta(tmp_path):
     await store.append(
         Message(
             role="assistant",
-            content=[ToolUseBlock(id="toolu_1", name="general-purpose",
-                                  input={"prompt": "do x"})],
+            content=[ToolUseBlock(id="toolu_1", name="general-purpose", input={"prompt": "do x"})],
         ),
         is_assistant=True,
     )
@@ -202,8 +224,11 @@ async def test_load_mainline_ignores_async_pending_meta(tmp_path):
     write_subagent_meta(
         paths.subagent_meta_path(tmp_path, "s1", tmp_path, "a9"),
         SubagentMeta(
-            agent_id="a9", agent_type="general-purpose", tool_use_id="(async-agent)",
-            is_async=True, status="running",
+            agent_id="a9",
+            agent_type="general-purpose",
+            tool_use_id="(async-agent)",
+            is_async=True,
+            status="running",
         ),
     )
     store2 = SessionStore(_ctx(), tmp_path, root=tmp_path)
@@ -211,3 +236,43 @@ async def test_load_mainline_ignores_async_pending_meta(tmp_path):
     store2.close()
     tr = _find_tool_result(turns, "toolu_1")
     assert "续跑" not in tr.content  # async 不走 sync 占位
+
+
+def test_repair_agent_tool_interrupt_shows_agent_id_resume_hint():
+    """agent tool(tu.agent_id 非空)中断 → repair 占位带 agent_id + 续跑提示(模型驱动)。"""
+    turns = [
+        Turn(
+            messages=[
+                Message(role="user", content=[TextBlock(text="go")]),
+                Message(
+                    role="assistant",
+                    content=[
+                        ToolUseBlock(
+                            id="toolu_1", name="explore", input={"prompt": "x"}, agent_id="sub-A"
+                        )
+                    ],
+                ),
+            ]
+        )
+    ]
+    codec.repair_trailing_edge(turns)
+    tr = _find_tool_result(turns, "toolu_1")
+    assert "sub-A" in tr.content and "resume_agent" in tr.content and "用户同意" in tr.content
+
+
+def test_repair_normal_tool_interrupt_keeps_default_message():
+    """普通工具(tu.agent_id None)中断 → repair 占位保持「请重新发起」。"""
+    turns = [
+        Turn(
+            messages=[
+                Message(role="user", content=[TextBlock(text="go")]),
+                Message(
+                    role="assistant",
+                    content=[ToolUseBlock(id="toolu_1", name="read_file", input={})],
+                ),
+            ]
+        )
+    ]
+    codec.repair_trailing_edge(turns)
+    tr = _find_tool_result(turns, "toolu_1")
+    assert tr.content == "工具调用因会话中断未完成,请重新发起"

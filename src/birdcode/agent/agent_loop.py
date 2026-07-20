@@ -51,8 +51,8 @@ Emit = Callable[[ProviderEvent], Awaitable[None]]
 OnMessage = Callable[..., Awaitable[None]]  # (msg, *, usage=None, stop_reason=None) -> None
 
 # 护栏:防失控与死循环(见 run_agent_loop 末尾)。
-_MAX_TOOL_ROUNDS = 200   # 轮次硬上限(200 宽松,不误杀复杂任务;到顶强制停防失控烧 token)
-_MAX_SAME_FAILURES = 3   # 连续熔断:同一工具 + 相同参数连续失败 N 次→停(防模型死循环重试)
+_MAX_TOOL_ROUNDS = 200  # 轮次硬上限(200 宽松,不误杀复杂任务;到顶强制停防失控烧 token)
+_MAX_SAME_FAILURES = 3  # 连续熔断:同一工具 + 相同参数连续失败 N 次→停(防模型死循环重试)
 # Reactive(413)重试上限:overflow→react→重试最多 2 次,仍连续超限→emit Error(防死循环)。
 _MAX_REACT_RETRIES = 2
 
@@ -134,6 +134,25 @@ class _AssistantAccumulator:
         if self._text:
             self.blocks.append(TextBlock(text="".join(self._text)))
             self._text.clear()
+
+
+def _esc_interrupt_error_message(tu: ToolUseBlock) -> str:
+    """ESC 中断的 tool_result 兜底文案。
+
+    agent tool(tu.agent_id 非空)→ 带 agent_id 的续跑提示(模型驱动 resume_agent);
+    普通工具 → "核查状态"文案(bash 非幂等,不说"未执行"防盲目重试造成损害)。
+    """
+    if tu.agent_id:
+        is_async = isinstance(tu.input, dict) and tu.input.get("run_in_background") is True
+        mode = "异步" if is_async else "同步"
+        return (
+            f"子 agent {tu.agent_id} 执行被中断,如需续跑以{mode}方式调 "
+            f"resume_agent(agent_id='{tu.agent_id}'),在调用 resume_agent 前务必获得用户同意"
+        )
+    return (
+        "用户中断(Esc):执行可能在完成前被终止,已改/已删的文件不会回滚。"
+        "重试前请先核查实际状态(read_file / ls / git status)。"
+    )
 
 
 async def run_agent_loop(
@@ -266,6 +285,10 @@ async def run_agent_loop(
                 raise
             continue  # 重试本轮 stream(不 increment rounds;maybe_compact 会再调一次)
         acc.flush()
+        # 落盘前给 agent tool_use 注入 agent_id(随 assistant_msg 落盘主线,供 resume 配对直联)。
+        # tool_uses 与 acc.blocks 是同一 ToolUseBlock 对象(:225-227 同 append),注入随 msg 落盘。
+        if executor is not None:
+            executor.annotate_tool_uses(tool_uses)
         assistant_msg = Message(role="assistant", content=acc.blocks)
         turn.messages.append(assistant_msg)
         if on_message is not None:
@@ -307,10 +330,7 @@ async def run_agent_loop(
                 or ToolResult(
                     tu.id,
                     ok=False,
-                    error_message=(
-                        "用户中断(Esc):执行可能在完成前被终止,已改/已删的文件不会回滚。"
-                        "重试前请先核查实际状态(read_file / ls / git status)。"
-                    ),
+                    error_message=_esc_interrupt_error_message(tu),
                 )
                 for tu in tool_uses
             ]

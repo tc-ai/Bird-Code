@@ -17,6 +17,7 @@ HEAD 匹配 → 直接复用,不调 git),幂等。
 mock 范式抄 tests/agents/test_resume_subagent.py(_FakeRegistry/_FakeManager/替身 Runner)。
 create_worktree / remove_worktree 走模块级 monkeypatch(免真实 git)。
 """
+
 from __future__ import annotations
 
 import json
@@ -31,7 +32,7 @@ from birdcode.agents.resume import ResumeDeps, resume_subagent
 from birdcode.agents.runner import SubagentReport
 from birdcode.session.models import SubagentMeta
 from birdcode.session.paths import subagent_jsonl_path, subagent_meta_path
-from birdcode.session.subagent_meta import read_subagent_meta, write_subagent_meta
+from birdcode.session.subagent_meta import write_subagent_meta
 
 
 @dataclass
@@ -82,7 +83,10 @@ class _FakeManager:
     """SubagentManager 替身:has_live + launch_async + 暴露 _store/_controller(降级注入用)。"""
 
     def __init__(
-        self, *, store: _FakeStore | None = None, controller: _FakeController | None = None,
+        self,
+        *,
+        store: _FakeStore | None = None,
+        controller: _FakeController | None = None,
         live_agent_ids: set[str] | None = None,
     ) -> None:
         self._store = store
@@ -117,15 +121,23 @@ def _defn() -> AgentDefinition:
 
 
 def _write_meta(
-    tmp_path: Path, *, agent_id: str, is_async: bool = True,
+    tmp_path: Path,
+    *,
+    agent_id: str,
+    is_async: bool = True,
     isolation: str | None = "worktree",
 ) -> None:
     meta_path = subagent_meta_path(tmp_path, "s1", tmp_path, agent_id)
     write_subagent_meta(
         meta_path,
         SubagentMeta(
-            agentId=agent_id, agentType="general-purpose", description="旧 worktree 任务",
-            toolUseId="(async-agent)", isAsync=is_async, status="running", isolation=isolation,
+            agentId=agent_id,
+            agentType="general-purpose",
+            description="旧 worktree 任务",
+            toolUseId="(async-agent)",
+            isAsync=is_async,
+            status="running",
+            isolation=isolation,
         ),
     )
 
@@ -133,27 +145,43 @@ def _write_meta(
 def _write_sidechain(tmp_path: Path, agent_id: str, *, text: str = "旧的部分产出") -> Path:
     """写一条配对 user+assistant 的侧链(供 _read_sidechain_final_text 读最后 assistant 文本)。"""
     p = subagent_jsonl_path(tmp_path, "s1", tmp_path, agent_id)
-    user_line = json.dumps({
-        "type": "user",
-        "message": {"role": "user", "content": [{"type": "text", "text": "原任务"}]},
-    })
-    asst_line = json.dumps({
-        "type": "assistant",
-        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
-    })
+    user_line = json.dumps(
+        {
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": "原任务"}]},
+        }
+    )
+    asst_line = json.dumps(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+        }
+    )
     p.write_text("\n".join([user_line, asst_line]) + "\n", encoding="utf-8")
     return p
 
 
 def _deps(
-    tmp_path: Path, *, manager: _FakeManager,
+    tmp_path: Path,
+    *,
+    manager: _FakeManager,
     defn: AgentDefinition | None = None,
 ) -> ResumeDeps:
     return ResumeDeps(
-        manager=manager, root=tmp_path, session_id="s1", project_root=tmp_path,
-        worktree_name=None, agent_registry=_FakeRegistry(defn if defn is not None else _defn()),
-        parent_provider=None, parent_registry=None, parent_gate=None, cfg=None, app=None,
-        ctx=None, spawn_depth=1, progress_cb=None,
+        manager=manager,
+        root=tmp_path,
+        session_id="s1",
+        project_root=tmp_path,
+        worktree_name=None,
+        agent_registry=_FakeRegistry(defn if defn is not None else _defn()),
+        parent_provider=None,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=None,
+        app=None,
+        ctx=None,
+        spawn_depth=1,
+        progress_cb=None,
     )
 
 
@@ -162,7 +190,8 @@ def _deps(
 
 @pytest.mark.asyncio
 async def test_resume_worktree_reuses_isolation_and_self_heals(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """worktree 续跑:create_worktree(复用 agent_id)自愈成功 → 透传 isolation + launch_async 派发。
 
@@ -185,7 +214,9 @@ async def test_resume_worktree_reuses_isolation_and_self_heals(
     monkeypatch.setattr(resume_mod, "create_worktree", _spy_create)
 
     result = await resume_subagent(
-        agent_id="sub-wt-old", direction="继续", deps=_deps(tmp_path, manager=mgr),
+        agent_id="sub-wt-old",
+        direction="继续",
+        deps=_deps(tmp_path, manager=mgr),
     )
 
     assert result.outcome == "async_launched"
@@ -206,12 +237,13 @@ async def test_resume_worktree_reuses_isolation_and_self_heals(
 
 @pytest.mark.asyncio
 async def test_resume_worktree_state_mismatch_degrades_to_inject(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """create_worktree 抛 FileExistsError(分支不符)→ 降级:注入侧链最后产出 + force 清孤儿。
+    """create_worktree 抛 FileExistsError(分支不符)→ B 方案:返回侧链最后产出,不注入、不清孤儿。
 
-    断言:未构造 runner / 未 launch;落点 A 三步注入(enqueue + is_task_notification user 行 +
-    notify_wake)且 notification 含侧链最后 assistant 文本;remove_worktree(force=True)清孤儿。
+    断言:未构造 runner / 未 launch;不系统注入(无 enqueue/notification);不清孤儿 worktree;
+    result.text 含侧链最后 assistant 文本。
     """
     _FakeRunner.constructed.clear()
     _write_meta(tmp_path, agent_id="sub-wt-dead", is_async=True, isolation="worktree")
@@ -226,87 +258,28 @@ async def test_resume_worktree_state_mismatch_degrades_to_inject(
 
     monkeypatch.setattr(resume_mod, "create_worktree", _boom_create)
 
-    remove_calls: list[tuple[Path, Path, bool]] = []
-
-    async def _spy_remove(main_repo: Path, wt: Path, *, force: bool = False) -> None:
-        remove_calls.append((main_repo, wt, force))
-
-    monkeypatch.setattr(resume_mod, "remove_worktree", _spy_remove)
-
     result = await resume_subagent(
-        agent_id="sub-wt-dead", direction="继续", deps=_deps(tmp_path, manager=mgr),
+        agent_id="sub-wt-dead",
+        direction="继续",
+        deps=_deps(tmp_path, manager=mgr),
     )
 
-    # 降级:未构造 runner、未 launch
+    # B 方案:不续跑、不系统注入、不清孤儿;resume_agent 返回侧链最后内容(模型驱动)
     assert _FakeRunner.constructed == []
     assert mgr.launched == []
-    # 落点 A 注入:enqueue + task-notification user 行 + wake
-    methods = [c.method for c in store.calls]
-    assert "append_queue_operation" in methods
-    assert "append" in methods
-    append_call = next(c for c in store.calls if c.method == "append")
-    assert append_call.kwargs.get("is_task_notification") is True
-    assert append_call.kwargs.get("agent_id") == "sub-wt-dead"
-    notification_text = append_call.kwargs["msg"].content[0].text  # type: ignore[attr-defined]
-    assert "旧的部分产出 ABC" in notification_text  # 侧链最后 assistant 文本进 notification
-    assert controller.woken == 1
-    # 清孤儿 worktree(force=True)
-    assert len(remove_calls) == 1
-    _, wt_removed, force = remove_calls[0]
-    assert force is True
-    assert wt_removed.name == "sub-wt-dead"
-    # result
+    assert store.calls == []  # 不 inject(无 enqueue/notification)
+    assert controller.woken == 0
     assert result.outcome == "sync_done"
+    assert "旧的部分产出 ABC" in result.text  # 返回侧链最后 assistant 文本
 
 
 # ---- Final review fix:降级注入后 meta 必须刷终态(error),避免 discover 永久列出 ----
 
 
 @pytest.mark.asyncio
-async def test_degrade_to_inject_marks_meta_terminal_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """worktree 状态不符降级注入后,meta.status 应刷成 error(并带 completed_at)。
-
-    修复红线:降级注入的是侧链最后产出但 worktree 状态不符属异常 → 与 report.status /
-    queue-operation status 一致标 error(非 cancelled——cancelled 可续跑,会被 discover 反复列出)。
-    """
-    _FakeRunner.constructed.clear()
-    _write_meta(tmp_path, agent_id="sub-wt-term", is_async=True, isolation="worktree")
-    _write_sidechain(tmp_path, "sub-wt-term", text="旧的部分产出 XYZ")
-
-    store = _FakeStore()
-    controller = _FakeController()
-    mgr = _FakeManager(store=store, controller=controller)
-
-    async def _boom_create(main_repo: Path, name: str, *, base_ref: str = "origin/HEAD") -> Path:  # noqa: ARG001
-        raise FileExistsError(f"worktree 已存在但状态不符: {name}")
-
-    monkeypatch.setattr(resume_mod, "create_worktree", _boom_create)
-
-    async def _noop_remove(main_repo: Path, wt: Path, *, force: bool = False) -> None:  # noqa: ARG001
-        return None
-
-    monkeypatch.setattr(resume_mod, "remove_worktree", _noop_remove)
-
-    await resume_subagent(
-        agent_id="sub-wt-term", direction="继续", deps=_deps(tmp_path, manager=mgr),
-    )
-
-    meta_path = subagent_meta_path(tmp_path, "s1", tmp_path, "sub-wt-term")
-    meta = read_subagent_meta(meta_path)
-    assert meta is not None
-    assert meta.status == "error"  # 终态,与 report.status / queue-operation status 一致
-    assert meta.completed_at  # 非空 ISO 时间戳
-    assert meta.completed_at.endswith("Z")
-
-
-# ---- 回归:非 worktree(isolation=None)不走 create_worktree 探查,不影响原 sync 路径 ----
-
-
-@pytest.mark.asyncio
 async def test_resume_non_worktree_does_not_probe_create_worktree(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """isolation=None(非 worktree 子 agent)不调 create_worktree,走原 sync run() 路径。
 
@@ -325,7 +298,9 @@ async def test_resume_non_worktree_does_not_probe_create_worktree(
     monkeypatch.setattr(resume_mod, "create_worktree", _fail_create)
 
     result = await resume_subagent(
-        agent_id="sub-plain", direction="继续", deps=_deps(tmp_path, manager=mgr),
+        agent_id="sub-plain",
+        direction="继续",
+        deps=_deps(tmp_path, manager=mgr),
     )
 
     assert result.outcome == "sync_done"

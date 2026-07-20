@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import ValidationError
@@ -108,6 +109,26 @@ class ToolExecutor:
             raise
         return [by_id[tu.id] for tu in tool_uses]
 
+    def annotate_tool_uses(self, tool_uses: list[ToolUseBlock]) -> None:
+        """落盘前给 agent tool_use 注入 agent_id(就地改 tu.agent_id)。
+
+        - _AgentTool/_ForkSkillTool(is_agent_tool=True,input 无 agent_id):新生成 sub-xxx。
+        - resume_agent(input.agent_id 存在):复制被续跑的 agent_id(续跑复用原 id,不新生成)。
+        - 普通工具(is_agent_tool=False)/未知工具:不动(agent_id 保持 None)。
+
+        agent_id 随 tu 落盘主线 assistant 行(ToolUseBlock.agent_id),供 resume 配对直联、
+        续跑定位、二次中断占位。必须在 agent_loop 落盘(on_message)前调(见 agent_loop)。
+        """
+        for tu in tool_uses:
+            tool = self._registry.get(tu.name)
+            if tool is None or not getattr(tool, "is_agent_tool", False):
+                continue
+            existing = tu.input.get("agent_id") if isinstance(tu.input, dict) else None
+            if isinstance(existing, str) and existing:
+                tu.agent_id = existing  # resume_agent:复用被续跑的 agent_id
+            else:
+                tu.agent_id = f"sub-{uuid.uuid4().hex[:12]}"  # 新派发:生成
+
     def last_partial(self) -> dict[str, ToolResult]:
         """上次 execute_batch 被 cancel 时已完成的真实结果(按 tool_use_id);正常完成则空。
 
@@ -148,6 +169,10 @@ class ToolExecutor:
                 )
 
         try:
+            # agent tool:透传落盘前注入的 agent_id(tu.agent_id) + 真实 tu.id(补原占位 plumb)。
+            if getattr(tool, "is_agent_tool", False):
+                args_dict["agent_id"] = tu.agent_id
+                args_dict["tool_use_id"] = tu.id
             result = await tool.execute(**args_dict)
         except ToolError as exc:
             # 工具执行期失败(McpServerDownError 等):干净 ok=False,绝不抛 Traceback。

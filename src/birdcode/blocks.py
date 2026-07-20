@@ -26,11 +26,16 @@ class ThinkingBlock:
 
 @dataclass
 class ToolUseBlock:
-    """assistant 发起的工具调用。input 是已解析的参数 dict。"""
+    """assistant 发起的工具调用。input 是已解析的参数 dict。
+
+    agent_id:子 agent 标识(仅 agent tool / resume_agent 的 tool_use 带,落盘前注入)。
+    持久化字段——provider _convert 白名单不带,绝不进 LLM API(见各 provider _convert)。
+    """
 
     id: str
     name: str
     input: dict[str, object]
+    agent_id: str | None = None
 
 
 @dataclass

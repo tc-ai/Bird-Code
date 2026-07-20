@@ -47,7 +47,10 @@ class AnthropicProvider(_BaseLLMProvider):
         system_override: str | None = None,
     ) -> None:
         super().__init__(
-            profile, app, registry=registry, mcp_instructions=mcp_instructions,
+            profile,
+            app,
+            registry=registry,
+            mcp_instructions=mcp_instructions,
             system_override=system_override,
         )
         self._client = client or AsyncAnthropic(base_url=profile.base_url, api_key=profile.api_key)
@@ -76,6 +79,7 @@ class AnthropicProvider(_BaseLLMProvider):
                         {"type": "thinking", "thinking": b.text, "signature": b.signature}
                     )
                 elif isinstance(b, ToolUseBlock):
+                    # agent_id 是持久化字段(block_to_dict 写 jsonl),本白名单不带 → 绝不进 API
                     blocks.append(
                         {"type": "tool_use", "id": b.id, "name": b.name, "input": b.input}
                     )

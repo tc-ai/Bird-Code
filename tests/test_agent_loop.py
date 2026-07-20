@@ -231,9 +231,7 @@ def test_summarize_glob_shows_file_count():
 def test_summarize_write_edit_shows_filename():
     from birdcode.blocks import ToolUseBlock
 
-    tu_w = ToolUseBlock(
-        id="w1", name="write_file", input={"file_path": "src/x.py", "content": "x"}
-    )
+    tu_w = ToolUseBlock(id="w1", name="write_file", input={"file_path": "src/x.py", "content": "x"})
     assert _summarize_tool(tu_w, "已写入", ok=True) == "x.py"
     tu_e = ToolUseBlock(id="e1", name="edit_file", input={"file_path": "README.md"})
     assert _summarize_tool(tu_e, "已编辑", ok=True) == "README.md"
@@ -512,6 +510,9 @@ async def test_tool_result_block_uses_llm_content_not_output():
         def last_partial(self):
             return {}
 
+        def annotate_tool_uses(self, tool_uses):  # type: ignore[no-untyped-def]
+            pass  # agent_loop 落盘前调;mock 无需注入 agent_id
+
     async def _noop_emit(ev):  # noqa: ARG001 - agent_loop 需要 awaitable emit
         return None
 
@@ -593,8 +594,12 @@ async def test_max_tool_rounds_stops_loop():
         events.append(ev)
 
     await run_agent_loop(
-        provider=p, turn=turn, history=[], executor=ToolExecutor(default_registry()),
-        emit=emit, max_tool_rounds=3,
+        provider=p,
+        turn=turn,
+        history=[],
+        executor=ToolExecutor(default_registry()),
+        emit=emit,
+        max_tool_rounds=3,
     )
     assert p.calls == 3  # 第 3 轮回填后 rounds==3 → 停,不再第 4 次 stream
     errs = [e for e in events if isinstance(e, Error)]
@@ -641,7 +646,12 @@ async def test_consecutive_same_failure_circuit_breaks():
         events.append(ev)
 
     await run_agent_loop(
-        provider=p, turn=turn, history=[], executor=ex, emit=emit, max_same_failures=3,
+        provider=p,
+        turn=turn,
+        history=[],
+        executor=ex,
+        emit=emit,
+        max_same_failures=3,
     )
     assert p.calls == 3  # 第 3 次失败后 streak==3 → 熔断,不再第 4 次 stream
     errs = [e for e in events if isinstance(e, Error)]

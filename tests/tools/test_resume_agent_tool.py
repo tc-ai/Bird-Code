@@ -1,5 +1,6 @@
 # tests/tools/test_resume_agent_tool.py
 """ResumeAgentTool 单测:mock resume_subagent,验证 async→ack 文本 / sync→inline 报告。"""
+
 from pathlib import Path
 
 import pytest
@@ -33,9 +34,7 @@ async def test_resume_agent_tool_async_returns_ack(monkeypatch):
     async def fake_resume(*, agent_id, direction, deps):
         return ResumeResult(outcome="async_launched", text=f"ack:{agent_id}:{direction}")
 
-    monkeypatch.setattr(
-        "birdcode.tools.resume_agent_tool.resume_subagent", fake_resume
-    )
+    monkeypatch.setattr("birdcode.tools.resume_agent_tool.resume_subagent", fake_resume)
     tool = _build_resume_tool()
     out = await tool.execute(agent_id="sub-1", direction="继续,改成 X")
     assert "ack:sub-1" in out and "改成 X" in out
@@ -46,12 +45,27 @@ async def test_resume_agent_tool_sync_returns_inline_report(monkeypatch):
     async def fake_resume(*, agent_id, direction, deps):
         return ResumeResult(outcome="sync_done", text="REPORT")
 
-    monkeypatch.setattr(
-        "birdcode.tools.resume_agent_tool.resume_subagent", fake_resume
-    )
+    monkeypatch.setattr("birdcode.tools.resume_agent_tool.resume_subagent", fake_resume)
     tool = _build_resume_tool()
     out = await tool.execute(agent_id="sub-sync", direction="继续")
     assert out == "REPORT"
+
+
+@pytest.mark.asyncio
+async def test_resume_agent_tool_accepts_tool_use_id_kwarg(monkeypatch):
+    """execute 接收 tool_use_id(executor._exec_one 对 is_agent_tool 透传),不报错。
+
+    回归:plumb 时 executor 给 is_agent_tool 工具追加 tool_use_id,resume_agent 也
+    is_agent_tool=True → execute 必须接收(忽略;resume 用 input.agent_id 续跑,不用 tu.id)。
+    """
+
+    async def fake_resume(*, agent_id, direction, deps):
+        return ResumeResult(outcome="sync_done", text="ok")
+
+    monkeypatch.setattr("birdcode.tools.resume_agent_tool.resume_subagent", fake_resume)
+    tool = _build_resume_tool()
+    out = await tool.execute(agent_id="sub-1", direction="继续", tool_use_id="toolu_x")
+    assert out == "ok"
 
 
 def test_resume_agent_tool_metadata():

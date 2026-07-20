@@ -8,6 +8,7 @@ execute 逻辑搬自旧 AgentTool(sync/async 两分支),runner/manager/侧链/�
 is_agent_tool=True 标记:build_child_registry 据此排除全部 agent tool(递归防护),
 且规避 runner↔agent_tools 循环 import(不用 isinstance import)。
 """
+
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
@@ -46,13 +47,13 @@ class AgentToolInput(BaseModel):
     isolation: Literal[None, "worktree"] = Field(
         default=None,
         description="隔离模式:'worktree'=给子 agent 一个独立 git worktree(改文件不踩主仓/兄弟),"
-                    "强制异步运行。None=复用当前工作区(默认)。",
+        "强制异步运行。None=复用当前工作区(默认)。",
     )
     run_in_background: bool | None = Field(
         default=None,
         description="True=异步后台跑(立即回执,完成后回流);False=同步阻塞等结果。"
-                    "None(默认)=用 agent 定义的 run_in_background。"
-                    "isolation='worktree' 时强制 True。",
+        "None(默认)=用 agent 定义的 run_in_background。"
+        "isolation='worktree' 时强制 True。",
     )
 
 
@@ -124,23 +125,47 @@ class _AgentTool(Tool):
             self._parent_provider = provider
 
     def _make_runner(
-        self, *, prompt: str, is_async: bool, tool_use_id: str,
+        self,
+        *,
+        prompt: str,
+        is_async: bool,
+        tool_use_id: str,
         isolation: Literal[None, "worktree"] = None,
+        agent_id: str | None = None,
     ) -> SubagentRunner:
-        """构造子 agent runner(sync/async 共用)。execute 与 skill 的 invoke_async 共享(DRY)。"""
+        """构造子 agent runner(sync/async 共用)。execute 与 skill 的 invoke_async 共享(DRY)。
+
+        agent_id:落盘前注入的子 agent 标识(经 executor → execute 透传);None → runner 自生成
+        fallback(slash 命令 invoke_async 不传)。tool_use_id:主线真实 tu.id(替换原占位)。
+        """
         return SubagentRunner(
-            defn=self._defn, prompt=prompt, description=self._defn.description,
-            tool_use_id=tool_use_id, model_override="",
-            spawn_depth=self._spawn_depth + 1, is_async=is_async, isolation=isolation,
-            parent_provider=self._parent_provider, parent_registry=self._parent_registry,
-            parent_gate=self._parent_gate, cfg=self._cfg, app=self._app, ctx=self._ctx,
-            project_root=self._project_root, progress_cb=self._progress_cb,
+            defn=self._defn,
+            prompt=prompt,
+            description=self._defn.description,
+            tool_use_id=tool_use_id,
+            agent_id=agent_id,
+            model_override="",
+            spawn_depth=self._spawn_depth + 1,
+            is_async=is_async,
+            isolation=isolation,
+            parent_provider=self._parent_provider,
+            parent_registry=self._parent_registry,
+            parent_gate=self._parent_gate,
+            cfg=self._cfg,
+            app=self._app,
+            ctx=self._ctx,
+            project_root=self._project_root,
+            progress_cb=self._progress_cb,
         )
 
     async def execute(  # type: ignore[override]
-        self, *, prompt: str,
+        self,
+        *,
+        prompt: str,
         isolation: Literal[None, "worktree"] = None,
         run_in_background: bool | None = None,
+        agent_id: str | None = None,
+        tool_use_id: str = "",
     ) -> str | ToolOutput:
         defn = self._defn
         if self._spawn_depth >= MAX_SPAWN_DEPTH:  # 防御性守卫
@@ -167,24 +192,37 @@ class _AgentTool(Tool):
                 )
             # tool_use_id 真实 plumb(contextvars)留后续;本轮用占位标识异步分支。
             runner = self._make_runner(
-                prompt=prompt, is_async=True, isolation=isolation, tool_use_id="(async-agent)",
+                prompt=prompt,
+                is_async=True,
+                isolation=isolation,
+                tool_use_id=tool_use_id,
+                agent_id=agent_id,
             )
             launch = await self._subagent_mgr.launch_async(runner)
             return ToolOutput(
                 text=launch.ack_text,
                 tool_use_result=build_launch_tool_use_result(
-                    defn, agent_id=runner.agent_id, prompt=prompt,
+                    defn,
+                    agent_id=runner.agent_id,
+                    prompt=prompt,
                     output_file=str(runner.sidechain_path),
                 ),
             )
 
         runner = self._make_runner(
-            prompt=prompt, is_async=False, isolation=isolation, tool_use_id="(sync-agent)",
+            prompt=prompt,
+            is_async=False,
+            isolation=isolation,
+            tool_use_id=tool_use_id,
+            agent_id=agent_id,
         )
         report = await runner.run()  # 同步阻塞,跑完即销毁
         return ToolOutput(
             text=build_task_notification(
-                report, defn, agent_id=runner.agent_id, prompt=prompt,
+                report,
+                defn,
+                agent_id=runner.agent_id,
+                prompt=prompt,
                 is_worktree=(runner.isolation == "worktree"),
             ),
             tool_use_result=build_agent_tool_use_result(
@@ -199,7 +237,7 @@ class _InlineSkillTool(Tool):
 
     parameters = InlineSkillInput
     is_agent_tool = False
-    kind = "read"           # 仅返回文本,无副作用;read→免派生确认、可并行
+    kind = "read"  # 仅返回文本,无副作用;read→免派生确认、可并行
     parallel_safe = True
 
     def __init__(self, *, defn: AgentDefinition) -> None:
@@ -218,9 +256,13 @@ class _ForkSkillTool(_AgentTool):
 
     parameters = ForkSkillInput  # type: ignore[assignment]  # 窄化基类 AgentToolInput→异构 schema
 
-    async def execute(self, *, args: str) -> str | ToolOutput:  # type: ignore[override]
+    async def execute(  # type: ignore[override]
+        self, *, args: str, agent_id: str | None = None, tool_use_id: str = ""
+    ) -> str | ToolOutput:
+        # agent_id/tool_use_id 由 executor._exec_one 对 is_agent_tool 工具透传(fork skill
+        # 经 LLM tool_use 路径走 execute),转发给 _AgentTool.execute → runner plumb。
         prompt = render_body(self._defn, args)
-        return await super().execute(prompt=prompt)
+        return await super().execute(prompt=prompt, agent_id=agent_id, tool_use_id=tool_use_id)
 
     async def invoke_async(self, args: str) -> str:
         """slash 命令路径:始终异步启动(不阻塞 UI),返回 ack 文本。摘要经 wake 回流。
@@ -234,9 +276,7 @@ class _ForkSkillTool(_AgentTool):
         return launch.ack_text
 
 
-def register_agent_tools(
-    registry: ToolRegistry, agents: AgentRegistry, **deps: object
-) -> None:
+def register_agent_tools(registry: ToolRegistry, agents: AgentRegistry, **deps: object) -> None:
     """启动时:对每个**非透明** defn(agent)造一个 _AgentTool 并注册。
 
     透明 defn(skill)交由 register_skill_tools 处理,此处跳过。kind/parallel_safe 直接取自
