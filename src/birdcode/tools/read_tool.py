@@ -162,9 +162,7 @@ class ReadTool(Tool):
             body = body[:_MAX_INLINE_CHARS] + hint
         return body
 
-    async def _read_sidecar_window(
-        self, p: Path, offset: int, limit: int, size: int
-    ) -> str:
+    async def _read_sidecar_window(self, p: Path, offset: int, limit: int, size: int) -> str:
         """流式读大 sidecar(>500KB)的 [offset, offset+limit) 行,扫描字节 ≤ _MAX_SIDECAR_SCAN_BYTES。
 
         大 sidecar 无上限(bash communicate 无上限捕获 / persist 无 size 守卫),read_bytes() 整文件

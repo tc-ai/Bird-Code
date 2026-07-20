@@ -189,6 +189,19 @@ uv run birdcode --profile gpt --theme light
 
 > `-c` 与 `-r` 互斥,同时给会报错;`--resume <id>` 仅允许字母数字与连字符,且须对应已存在会话。worktree 会话的存储与主仓隔离——`birdcode -c`(在主仓)只找主仓会话,`birdcode -w <name> -c` 只找该 worktree 的会话。
 
+### 会话可视化
+
+把会话 jsonl 渲染成交互式 HTML 执行流程树（消息卡片 + 时间线 + 子 agent 分支），便于回看与调试：
+
+```bash
+# 按 sessionId 或 jsonl 路径渲染（默认输出 <stem>.html）
+uv run birdcode session viz <sessionId>
+uv run birdcode session viz path/to/session.jsonl
+
+# 指定输出路径 + 生成后用浏览器打开
+uv run birdcode session viz <sessionId> -o report.html --open
+```
+
 启动后在输入框输入 `/` 查看 slash 命令（`/help`、`/compact`、`/clear`、`/permissions`、`/sessions` 等），`Tab` 补全命令与文件路径。
 
 ## 项目结构

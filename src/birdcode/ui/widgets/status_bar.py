@@ -62,11 +62,7 @@ class StatusBar(Static):
     # 中性白(无蓝调):$secondary=#6b7080 蓝灰在黑底上偏蓝看不清;模式标签靠 markup 自带色覆盖。
     DEFAULT_CSS = "StatusBar { color: #e6e6e6; }"
 
-    def refresh_from(
-        self, *, mode: str, unicode_supported: bool, queue_size: int = 0
-    ) -> None:
+    def refresh_from(self, *, mode: str, unicode_supported: bool, queue_size: int = 0) -> None:
         self.update(
-            format_status(
-                mode=mode, unicode_supported=unicode_supported, queue_size=queue_size
-            )
+            format_status(mode=mode, unicode_supported=unicode_supported, queue_size=queue_size)
         )

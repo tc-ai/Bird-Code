@@ -1,4 +1,5 @@
 """子 agent 定义注册表:层覆盖(project > user > builtin)。"""
+
 from __future__ import annotations
 
 from birdcode.agents.definition import AgentDefinition

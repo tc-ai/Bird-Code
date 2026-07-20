@@ -1,4 +1,5 @@
 """记忆索引启动加载测试:两级优先级、缺失跳过、200 行/25KB 上限、空。"""
+
 from __future__ import annotations
 
 from pathlib import Path

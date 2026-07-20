@@ -9,6 +9,7 @@
 
 绝不 git branch -D(防丢未合并 commit)。
 """
+
 import shutil
 import subprocess
 from pathlib import Path
@@ -46,7 +47,9 @@ async def test_cleanup_success_clean_removes_dir_and_branch_when_merged(tmp_path
     assert not wt.exists()
     out = subprocess.run(
         ["git", "branch", "--list", "worktree-sub-abc"],
-        cwd=main, capture_output=True, text=True,
+        cwd=main,
+        capture_output=True,
+        text=True,
     )
     assert "worktree-sub-abc" not in out.stdout  # branch -d 删了
 
@@ -63,7 +66,9 @@ async def test_cleanup_success_dirty_keeps_dir_and_branch(tmp_path):
     assert wt.exists()  # 脏 → 留目录
     out = subprocess.run(
         ["git", "branch", "--list", "worktree-sub-dirty"],
-        cwd=main, capture_output=True, text=True,
+        cwd=main,
+        capture_output=True,
+        text=True,
     )
     assert "worktree-sub-dirty" in out.stdout  # 留分支
 
@@ -82,7 +87,9 @@ async def test_cleanup_success_unmerged_keeps_branch(tmp_path):
     assert not wt.exists()  # clean working tree → 删目录
     out = subprocess.run(
         ["git", "log", "--oneline", "worktree-sub-unmerged"],
-        cwd=main, capture_output=True, text=True,
+        cwd=main,
+        capture_output=True,
+        text=True,
     )
     assert "work" in out.stdout  # 分支+commit 在(branch -d 因未合并失败→留)
 
@@ -98,6 +105,8 @@ async def test_cleanup_failed_keeps_dir_and_branch(tmp_path):
     assert wt.exists()
     out = subprocess.run(
         ["git", "branch", "--list", "worktree-sub-fail"],
-        cwd=main, capture_output=True, text=True,
+        cwd=main,
+        capture_output=True,
+        text=True,
     )
     assert "worktree-sub-fail" in out.stdout

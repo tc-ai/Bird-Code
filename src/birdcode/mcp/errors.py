@@ -23,7 +23,7 @@ class McpServerDownError(ToolError):
     def _format(self) -> str:
         return (
             "<error>MCP 工具不可用:"
-            f"mcp__{self.server}__{self.tool} 所属 server \"{self.server}\" {self.reason},"
+            f'mcp__{self.server}__{self.tool} 所属 server "{self.server}" {self.reason},'
             "本次调用未执行。</error>\n"
             "<hint>该工具在本会话内仍保留在列表中,但本次无法执行(断连后不自动重连)。"
             "请改用其它可用工具,或重启会话后重试;无需修改计划。</hint>"

@@ -5,6 +5,7 @@
 ChoicePrompt 弹底部行内菜单,用户选预设 / 输入自定义 / Esc 取消 → 结果回 tool_result。
 异步子 agent 无法交互:build_child_registry 把本工具换成 AskUserAsyncStub(execute 恒拒)。
 """
+
 from __future__ import annotations
 
 from pydantic import BaseModel, Field

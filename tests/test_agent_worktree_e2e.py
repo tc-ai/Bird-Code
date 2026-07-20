@@ -11,6 +11,7 @@
 测试层级:SubagentRunner(AgentTool.execute 路由已由 Task 6 覆盖;permission gate 的 worktree 锁定
 已由 Task 7 单测覆盖)。parent_gate=None——聚焦文件路径隔离;gate 路径由 Task 7 独立覆盖。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -53,8 +54,11 @@ def _cfg() -> AppConfig:
     return AppConfig(
         providers={
             "p": ProviderProfile(
-                name="p", protocol="anthropic", model="m",
-                base_url="http://x", api_key="k",
+                name="p",
+                protocol="anthropic",
+                model="m",
+                base_url="http://x",
+                api_key="k",
             )
         },
         default="p",
@@ -69,7 +73,12 @@ class _ParentProviderStub:
 
 
 def _fake_build_provider(  # noqa: ARG001
-    profile, app, *, registry=None, system_override=None, mcp_instructions=None,
+    profile,
+    app,
+    *,
+    registry=None,
+    system_override=None,
+    mcp_instructions=None,
 ):
     """避免真实 API:返回仅含 .profile 的桩(run_agent_loop 也被 mock,不会 stream)。"""
     return type("P", (), {"profile": profile})()
@@ -117,7 +126,8 @@ async def test_worktree_subagent_isolates_writes(tmp_path, monkeypatch):
         assert wt_cwd is not None, "_AGENT_CWD 应在 run_agent_loop 前设为 worktree dir"
         # 驱动真实 WriteTool 经 executor 执行(相对路径 src/bar.py → 解析到 worktree)
         tu = ToolUseBlock(
-            id="call_write", name="write_file",
+            id="call_write",
+            name="write_file",
             input={"file_path": "src/bar.py", "content": "# subagent output\n"},
         )
         results = await executor.execute_batch([tu])
@@ -135,12 +145,22 @@ async def test_worktree_subagent_isolates_writes(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "run_agent_loop", _fake_loop)
 
     r = SubagentRunner(
-        defn=defn, prompt="写 src/bar.py", description="d", tool_use_id="call_wt",
-        model_override="", spawn_depth=1, is_async=True,
+        defn=defn,
+        prompt="写 src/bar.py",
+        description="d",
+        tool_use_id="call_wt",
+        model_override="",
+        spawn_depth=1,
+        is_async=True,
         isolation="worktree",
         parent_provider=_ParentProviderStub(cfg.providers["p"]),
-        parent_registry=_parent_registry(), parent_gate=None, cfg=cfg, app=None, ctx=ctx,
-        project_root=main, root=tmp_path,
+        parent_registry=_parent_registry(),
+        parent_gate=None,
+        cfg=cfg,
+        app=None,
+        ctx=ctx,
+        project_root=main,
+        root=tmp_path,
     )
     report = await r.run()
 
@@ -197,7 +217,8 @@ async def test_two_worktree_subagents_dont_collide(tmp_path, monkeypatch):
         content = contents[agent_id]
         # 驱动真实 WriteTool 经 executor 执行(同名 src/out.txt,不同内容)
         tu = ToolUseBlock(
-            id=f"call_{agent_id}", name="write_file",
+            id=f"call_{agent_id}",
+            name="write_file",
             input={"file_path": "src/out.txt", "content": content},
         )
         results = await executor.execute_batch([tu])
@@ -207,20 +228,40 @@ async def test_two_worktree_subagents_dont_collide(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "run_agent_loop", _fake_loop)
 
     r1 = SubagentRunner(
-        defn=defn, prompt="写 src/out.txt", description="A", tool_use_id="call_a",
-        model_override="", spawn_depth=1, is_async=True,
+        defn=defn,
+        prompt="写 src/out.txt",
+        description="A",
+        tool_use_id="call_a",
+        model_override="",
+        spawn_depth=1,
+        is_async=True,
         isolation="worktree",
         parent_provider=_ParentProviderStub(cfg.providers["p"]),
-        parent_registry=_parent_registry(), parent_gate=None, cfg=cfg, app=None, ctx=ctx,
-        project_root=main, root=tmp_path,
+        parent_registry=_parent_registry(),
+        parent_gate=None,
+        cfg=cfg,
+        app=None,
+        ctx=ctx,
+        project_root=main,
+        root=tmp_path,
     )
     r2 = SubagentRunner(
-        defn=defn, prompt="写 src/out.txt", description="B", tool_use_id="call_b",
-        model_override="", spawn_depth=1, is_async=True,
+        defn=defn,
+        prompt="写 src/out.txt",
+        description="B",
+        tool_use_id="call_b",
+        model_override="",
+        spawn_depth=1,
+        is_async=True,
         isolation="worktree",
         parent_provider=_ParentProviderStub(cfg.providers["p"]),
-        parent_registry=_parent_registry(), parent_gate=None, cfg=cfg, app=None, ctx=ctx,
-        project_root=main, root=tmp_path,
+        parent_registry=_parent_registry(),
+        parent_gate=None,
+        cfg=cfg,
+        app=None,
+        ctx=ctx,
+        project_root=main,
+        root=tmp_path,
     )
     contents[r1.agent_id] = "content from A"
     contents[r2.agent_id] = "content from B"
@@ -297,7 +338,8 @@ async def test_worktree_subagent_real_gate_relative_write(tmp_path, monkeypatch)
         wt_cwd = _AGENT_CWD.get()
         assert wt_cwd is not None, "_AGENT_CWD 应在 run_agent_loop 前设为 worktree dir"
         tu = ToolUseBlock(
-            id="call_rel", name="write_file",
+            id="call_rel",
+            name="write_file",
             input={"file_path": "src/new.py", "content": "# relative path\n"},
         )
         results = await executor.execute_batch([tu])
@@ -316,12 +358,22 @@ async def test_worktree_subagent_real_gate_relative_write(tmp_path, monkeypatch)
     monkeypatch.setattr(runner, "run_agent_loop", _fake_loop)
 
     r = SubagentRunner(
-        defn=defn, prompt="写 src/new.py(相对路径)", description="d", tool_use_id="call_rel",
-        model_override="", spawn_depth=1, is_async=True,
+        defn=defn,
+        prompt="写 src/new.py(相对路径)",
+        description="d",
+        tool_use_id="call_rel",
+        model_override="",
+        spawn_depth=1,
+        is_async=True,
         isolation="worktree",
         parent_provider=_ParentProviderStub(cfg.providers["p"]),
-        parent_registry=_parent_registry(), parent_gate=parent_gate, cfg=cfg, app=None, ctx=ctx,
-        project_root=main, root=tmp_path,
+        parent_registry=_parent_registry(),
+        parent_gate=parent_gate,
+        cfg=cfg,
+        app=None,
+        ctx=ctx,
+        project_root=main,
+        root=tmp_path,
     )
     report = await r.run()
 

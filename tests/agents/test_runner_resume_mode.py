@@ -10,6 +10,7 @@
 stub 构造抄自 tests/agents/test_runner_run.py(_FakeProvider/_cfg/_ctx/_defn +MonkeyPatch
 build_provider 范式),不从零发明。
 """
+
 from __future__ import annotations
 
 import json
@@ -57,8 +58,11 @@ class _HistoryCapturingProvider:
 
 def _cfg() -> AppConfig:
     return AppConfig(
-        providers={"p": ProviderProfile(name="p", protocol="anthropic", model="m",
-                                        base_url="http://x", api_key="k")},
+        providers={
+            "p": ProviderProfile(
+                name="p", protocol="anthropic", model="m", base_url="http://x", api_key="k"
+            )
+        },
         default="p",
     )
 
@@ -72,7 +76,11 @@ def _defn() -> AgentDefinition:
 
 
 def _build_test_runner(
-    *, agent_id: str | None, resume_from: Path | None, prompt: str, tmp_path: Path,
+    *,
+    agent_id: str | None,
+    resume_from: Path | None,
+    prompt: str,
+    tmp_path: Path,
 ) -> SubagentRunner:
     """最小依赖构造 SubagentRunner(抄 tests/agents/test_runner_run.py 范式)。
 
@@ -80,29 +88,52 @@ def _build_test_runner(
     _HistoryCapturingProvider(见各 test)。本 helper 仅组装 runner。
     """
     return SubagentRunner(
-        defn=_defn(), prompt=prompt, description="d", tool_use_id="call_resume",
-        model_override="", spawn_depth=1, is_async=False,
-        parent_provider=_FakeProvider(profile=_cfg().providers["p"]), parent_registry=None,
-        parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
-        project_root=tmp_path, root=tmp_path,
-        agent_id=agent_id, resume_from=resume_from,
+        defn=_defn(),
+        prompt=prompt,
+        description="d",
+        tool_use_id="call_resume",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
+        parent_provider=_FakeProvider(profile=_cfg().providers["p"]),
+        parent_registry=None,
+        parent_gate=None,
+        cfg=_cfg(),
+        app=None,
+        ctx=_ctx(),
+        project_root=tmp_path,
+        root=tmp_path,
+        agent_id=agent_id,
+        resume_from=resume_from,
     )
 
 
 def _write_paired_sidechain(path: Path, user_text: str = "原任务") -> None:
     """写一条已配对的完整 Turn(user + assistant-text),不触发 repair。"""
     path.write_text(
-        "\n".join([
-            json.dumps({
-                "type": "user",
-                "message": {"role": "user", "content": [{"type": "text", "text": user_text}]},
-            }),
-            json.dumps({
-                "type": "assistant",
-                "message": {"role": "assistant",
-                            "content": [{"type": "text", "text": "旧回复"}]},
-            }),
-        ]) + "\n",
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "text", "text": user_text}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "旧回复"}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -115,7 +146,9 @@ def test_runner_accepts_injected_agent_id_and_resume_from(tmp_path: Path):
     fake_sidechain = tmp_path / "agent-sub-old123.jsonl"
     _write_paired_sidechain(fake_sidechain, user_text="原任务")
     runner = _build_test_runner(
-        agent_id="sub-old123", resume_from=fake_sidechain, prompt="继续,改成 X",
+        agent_id="sub-old123",
+        resume_from=fake_sidechain,
+        prompt="继续,改成 X",
         tmp_path=tmp_path,
     )
     assert runner.agent_id == "sub-old123"  # 复用,非新生成
@@ -125,7 +158,10 @@ def test_runner_accepts_injected_agent_id_and_resume_from(tmp_path: Path):
 def test_runner_defaults_agent_id_when_not_injected(tmp_path: Path):
     """不注入 agent_id → 保持原行为:sub-{uuid12}。回归红线(不破坏既有构造)。"""
     runner = _build_test_runner(
-        agent_id=None, resume_from=None, prompt="新任务", tmp_path=tmp_path,
+        agent_id=None,
+        resume_from=None,
+        prompt="新任务",
+        tmp_path=tmp_path,
     )
     assert runner.agent_id.startswith("sub-")
     assert len(runner.agent_id) == len("sub-") + 12
@@ -155,7 +191,9 @@ async def test_run_resume_loads_sidechain_as_history_and_appends_direction(tmp_p
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(runner, "build_provider", _spy)
         runner_obj = _build_test_runner(
-            agent_id="sub-resume1", resume_from=fake_sidechain, prompt="继续,改成 X",
+            agent_id="sub-resume1",
+            resume_from=fake_sidechain,
+            prompt="继续,改成 X",
             tmp_path=tmp_path,
         )
         sidechain_path = runner_obj.sidechain_path  # store.append 写入此路径
@@ -197,9 +235,14 @@ async def test_run_resume_preserves_meta_prompt_not_clobbered_by_direction(tmp_p
     write_subagent_meta(
         meta_path,
         SubagentMeta(
-            agentId=agent_id, agentType="general-purpose", description="原任务描述",
-            toolUseId="call_resume", isAsync=False, status="running",
-            spawnedAt="2026-01-01T00:00:00Z", prompt="原任务:实现 X",
+            agentId=agent_id,
+            agentType="general-purpose",
+            description="原任务描述",
+            toolUseId="call_resume",
+            isAsync=False,
+            status="running",
+            spawnedAt="2026-01-01T00:00:00Z",
+            prompt="原任务:实现 X",
         ),
     )
     fake_sidechain = tmp_path / "agent-sub-keep3.jsonl"
@@ -211,7 +254,9 @@ async def test_run_resume_preserves_meta_prompt_not_clobbered_by_direction(tmp_p
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(runner, "build_provider", _build)
         runner_obj = _build_test_runner(
-            agent_id=agent_id, resume_from=fake_sidechain, prompt="继续,改 Y",
+            agent_id=agent_id,
+            resume_from=fake_sidechain,
+            prompt="继续,改 Y",
             tmp_path=tmp_path,
         )
         report = await runner_obj.run()

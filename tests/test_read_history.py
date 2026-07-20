@@ -22,16 +22,24 @@ _TS = "2026-07-06T00:00:00.000Z"
 
 def _u(text: str, uuid: str, parent: str | None) -> dict:
     return {
-        "type": "user", "uuid": uuid, "parentUuid": parent, "sessionId": "s1",
-        "timestamp": _TS, "isSidechain": False,
+        "type": "user",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": "s1",
+        "timestamp": _TS,
+        "isSidechain": False,
         "message": {"role": "user", "content": [{"type": "text", "text": text}]},
     }
 
 
 def _a(text: str, uuid: str, parent: str | None) -> dict:
     return {
-        "type": "assistant", "uuid": uuid, "parentUuid": parent, "sessionId": "s1",
-        "timestamp": _TS, "isSidechain": False,
+        "type": "assistant",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": "s1",
+        "timestamp": _TS,
+        "isSidechain": False,
         "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
     }
 
@@ -39,8 +47,12 @@ def _a(text: str, uuid: str, parent: str | None) -> dict:
 def _assistant_tool_use(uuid: str, parent: str | None, tu_id: str = "tu1") -> dict:
     """assistant 行只含一个 tool_use 块。"""
     return {
-        "type": "assistant", "uuid": uuid, "parentUuid": parent, "sessionId": "s1",
-        "timestamp": _TS, "isSidechain": False,
+        "type": "assistant",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": "s1",
+        "timestamp": _TS,
+        "isSidechain": False,
         "message": {
             "role": "assistant",
             "content": [
@@ -53,8 +65,12 @@ def _assistant_tool_use(uuid: str, parent: str | None, tu_id: str = "tu1") -> di
 def _user_tool_result(uuid: str, parent: str | None, content: str, tu_id: str = "tu1") -> dict:
     """user 行只含一个 tool_result 块(回填,无 text → 不开新 Turn)。"""
     return {
-        "type": "user", "uuid": uuid, "parentUuid": parent, "sessionId": "s1",
-        "timestamp": _TS, "isSidechain": False,
+        "type": "user",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": "s1",
+        "timestamp": _TS,
+        "isSidechain": False,
         "message": {
             "role": "user",
             "content": [{"type": "tool_result", "tool_use_id": tu_id, "content": content}],
@@ -67,9 +83,14 @@ def _boundary(uuid: str, logical_parent: str, *, preserved: int | None = None) -
     if preserved is not None:
         meta["preservedTurnCount"] = preserved
     return {
-        "type": "system", "subtype": "compact_boundary", "uuid": uuid,
-        "parentUuid": None, "logicalParentUuid": logical_parent, "sessionId": "s1",
-        "timestamp": _TS, "isSidechain": False,
+        "type": "system",
+        "subtype": "compact_boundary",
+        "uuid": uuid,
+        "parentUuid": None,
+        "logicalParentUuid": logical_parent,
+        "sessionId": "s1",
+        "timestamp": _TS,
+        "isSidechain": False,
         "content": "Conversation compacted",
         "compactMetadata": meta,
     }
@@ -77,8 +98,13 @@ def _boundary(uuid: str, logical_parent: str, *, preserved: int | None = None) -
 
 def _summary(uuid: str, parent: str) -> dict:
     return {
-        "type": "user", "uuid": uuid, "parentUuid": parent, "sessionId": "s1",
-        "timestamp": _TS, "isSidechain": False, "isCompactSummary": True,
+        "type": "user",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": "s1",
+        "timestamp": _TS,
+        "isSidechain": False,
+        "isCompactSummary": True,
         "message": {"role": "user", "content": [{"type": "text", "text": "SUMMARY..."}]},
     }
 
@@ -108,11 +134,16 @@ async def test_reads_compressed_newest_first_with_pagination(tmp_path: Path) -> 
     """3 轮被压缩(T1=alpha 最早 → T3=gamma 最新),offset=0/limit=2 → gamma,beta;alpha 不含。"""
     f = tmp_path / "s1.jsonl"
     rows = [
-        _u("alpha", "1", None), _a("A1", "2", "1"),
-        _u("beta", "3", "2"), _a("A2", "4", "3"),
-        _u("gamma", "5", "4"), _a("A3", "6", "5"),
-        _boundary("b1", "6"), _summary("s1", "b1"),
-        _u("tail-live", "7", "s1"), _a("tail-resp", "8", "7"),
+        _u("alpha", "1", None),
+        _a("A1", "2", "1"),
+        _u("beta", "3", "2"),
+        _a("A2", "4", "3"),
+        _u("gamma", "5", "4"),
+        _a("A3", "6", "5"),
+        _boundary("b1", "6"),
+        _summary("s1", "b1"),
+        _u("tail-live", "7", "s1"),
+        _a("tail-resp", "8", "7"),
     ]
     _write_jsonl(f, rows)
     tool = ReadHistoryTool()
@@ -134,10 +165,14 @@ async def test_pagination_to_older_window(tmp_path: Path) -> None:
     """offset=2/limit=2 → 只剩 T1(alpha);提示可往更新翻。"""
     f = tmp_path / "s1.jsonl"
     rows = [
-        _u("alpha", "1", None), _a("A1", "2", "1"),
-        _u("beta", "3", "2"), _a("A2", "4", "3"),
-        _u("gamma", "5", "4"), _a("A3", "6", "5"),
-        _boundary("b1", "6"), _summary("s1", "b1"),
+        _u("alpha", "1", None),
+        _a("A1", "2", "1"),
+        _u("beta", "3", "2"),
+        _a("A2", "4", "3"),
+        _u("gamma", "5", "4"),
+        _a("A3", "6", "5"),
+        _boundary("b1", "6"),
+        _summary("s1", "b1"),
     ]
     _write_jsonl(f, rows)
     tool = ReadHistoryTool()
@@ -167,11 +202,16 @@ async def test_most_recent_boundary_is_anchor(tmp_path: Path) -> None:
     """两次压缩:以【最近一次】boundary 为基点 —— 它之前的可读,它之后的 tail 不可读。"""
     f = tmp_path / "s1.jsonl"
     rows = [
-        _u("old", "1", None), _a("A1", "2", "1"),
-        _boundary("b1", "2"), _summary("sum1", "b1"),
-        _u("mid", "3", "sum1"), _a("A2", "4", "3"),
-        _boundary("b2", "4"), _summary("sum2", "b2"),
-        _u("tail-live", "5", "sum2"), _a("A3", "6", "5"),
+        _u("old", "1", None),
+        _a("A1", "2", "1"),
+        _boundary("b1", "2"),
+        _summary("sum1", "b1"),
+        _u("mid", "3", "sum1"),
+        _a("A2", "4", "3"),
+        _boundary("b2", "4"),
+        _summary("sum2", "b2"),
+        _u("tail-live", "5", "sum2"),
+        _a("A3", "6", "5"),
     ]
     _write_jsonl(f, rows)
     tool = ReadHistoryTool()
@@ -188,10 +228,14 @@ async def test_compact_summaries_do_not_count_toward_limit(tmp_path: Path) -> No
     """更早的压缩摘要(isCompactSummary)不是 user-assistant 对 → 不占 limit 名额、不展示。"""
     f = tmp_path / "s1.jsonl"
     rows = [
-        _u("t1", "1", None), _a("a1", "2", "1"),
-        _boundary("b1", "2"), _summary("sum1", "b1"),
-        _u("t2", "3", "sum1"), _a("a2", "4", "3"),
-        _boundary("b2", "4"), _summary("sum2", "b2"),
+        _u("t1", "1", None),
+        _a("a1", "2", "1"),
+        _boundary("b1", "2"),
+        _summary("sum1", "b1"),
+        _u("t2", "3", "sum1"),
+        _a("a2", "4", "3"),
+        _boundary("b2", "4"),
+        _summary("sum2", "b2"),
     ]
     _write_jsonl(f, rows)
     tool = ReadHistoryTool()
@@ -210,14 +254,18 @@ async def test_tail_skipped_when_preserved_turn_count_set(tmp_path: Path) -> Non
     f = tmp_path / "s1.jsonl"
     rows = [
         # prefix(被摘要、已丢失):alpha, beta
-        _u("alpha", "1", None), _a("A1", "2", "1"),
-        _u("beta", "3", "2"), _a("A2", "4", "3"),
+        _u("alpha", "1", None),
+        _a("A1", "2", "1"),
+        _u("beta", "3", "2"),
+        _a("A2", "4", "3"),
         # 尾段(保留进 live、又重写到边界后):gamma —— 边界前这份是原始副本,应跳过
-        _u("gamma", "5", "4"), _a("A3", "6", "5"),
+        _u("gamma", "5", "4"),
+        _a("A3", "6", "5"),
         _boundary("b1", "6", preserved=1),  # 尾段 1 轮 = gamma
         _summary("s1", "b1"),
         # 边界之后:重写的尾段(= live)
-        _u("gamma-live", "7", "s1"), _a("A3-live", "8", "7"),
+        _u("gamma-live", "7", "s1"),
+        _a("A3-live", "8", "7"),
     ]
     _write_jsonl(f, rows)
     tool = ReadHistoryTool()
@@ -238,8 +286,10 @@ async def test_old_boundary_without_preserved_reads_all(tmp_path: Path) -> None:
     """
     f = tmp_path / "s1.jsonl"
     rows = [
-        _u("alpha", "1", None), _a("A1", "2", "1"),
-        _u("gamma", "5", "4"), _a("A3", "6", "5"),
+        _u("alpha", "1", None),
+        _a("A1", "2", "1"),
+        _u("gamma", "5", "4"),
+        _a("A3", "6", "5"),
         _boundary("b1", "6"),  # 无 preserved → N=0
         _summary("s1", "b1"),
     ]
@@ -264,7 +314,8 @@ async def test_tool_result_block_truncated(tmp_path: Path) -> None:
         _assistant_tool_use("2", "1"),
         _user_tool_result("3", "2", huge),
         _a("done", "4", "3"),
-        _boundary("b1", "4"), _summary("s1", "b1"),
+        _boundary("b1", "4"),
+        _summary("s1", "b1"),
     ]
     _write_jsonl(f, rows)
     tool = ReadHistoryTool()
@@ -280,14 +331,22 @@ async def test_only_reads_injected_session_path(tmp_path: Path) -> None:
     other = tmp_path / "other.jsonl"
     _write_jsonl(
         other,
-        [_u("secret-other-session", "1", None), _a("A", "2", "1"),
-         _boundary("b1", "2"), _summary("s1", "b1")],
+        [
+            _u("secret-other-session", "1", None),
+            _a("A", "2", "1"),
+            _boundary("b1", "2"),
+            _summary("s1", "b1"),
+        ],
     )
     cur = tmp_path / "current.jsonl"
     _write_jsonl(
         cur,
-        [_u("current-msg", "1", None), _a("A", "2", "1"),
-         _boundary("b1", "2"), _summary("s1", "b1")],
+        [
+            _u("current-msg", "1", None),
+            _a("A", "2", "1"),
+            _boundary("b1", "2"),
+            _summary("s1", "b1"),
+        ],
     )
     tool = ReadHistoryTool()
     tool.set_jsonl(cur)  # 只注入当前会话
@@ -326,22 +385,35 @@ async def test_text_and_tool_use_args_truncated(tmp_path: Path) -> None:
     f = tmp_path / "s1.jsonl"
     rows = [
         {
-            "type": "user", "uuid": "1", "parentUuid": None, "sessionId": "s1",
-            "timestamp": _TS, "isSidechain": False,
+            "type": "user",
+            "uuid": "1",
+            "parentUuid": None,
+            "sessionId": "s1",
+            "timestamp": _TS,
+            "isSidechain": False,
             "message": {"role": "user", "content": [{"type": "text", "text": huge_text}]},
         },
         {
-            "type": "assistant", "uuid": "2", "parentUuid": "1", "sessionId": "s1",
-            "timestamp": _TS, "isSidechain": False,
+            "type": "assistant",
+            "uuid": "2",
+            "parentUuid": "1",
+            "sessionId": "s1",
+            "timestamp": _TS,
+            "isSidechain": False,
             "message": {
                 "role": "assistant",
                 "content": [
-                    {"type": "tool_use", "id": "tu1", "name": "write_file",
-                     "input": {"file_path": "x", "content": huge_content}},
+                    {
+                        "type": "tool_use",
+                        "id": "tu1",
+                        "name": "write_file",
+                        "input": {"file_path": "x", "content": huge_content},
+                    },
                 ],
             },
         },
-        _boundary("b1", "2"), _summary("s1", "b1"),
+        _boundary("b1", "2"),
+        _summary("s1", "b1"),
     ]
     _write_jsonl(f, rows)
     tool = ReadHistoryTool()

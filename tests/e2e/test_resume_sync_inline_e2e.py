@@ -30,6 +30,7 @@ tool_result content 改「中断,待续跑」)。
 mock 范式:抄 tests/e2e/test_resume_async_e2e.py(_FakeRunner + 真实 meta/侧链/paths +
 monkeypatch resume_mod.SubagentRunner),改成 sync 场景(is_async=False)+ 阻塞探针。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -151,9 +152,7 @@ def _cfg() -> AppConfig:
 
 
 def _make_store(tmp_path: Path, session_id: str) -> SessionStore:
-    ctx = SessionContext(
-        session_id=session_id, cwd=str(tmp_path), version="0.1.0", git_branch=None
-    )
+    ctx = SessionContext(session_id=session_id, cwd=str(tmp_path), version="0.1.0", git_branch=None)
     return SessionStore(ctx, tmp_path, root=tmp_path)
 
 
@@ -229,7 +228,10 @@ def _notif_rows(rows: list[dict], agent_id: str | None = None) -> list[dict]:
 
 def _find_tool_result(turns: list[Turn], tool_use_id: str) -> ToolResultBlock:
     return next(
-        b for t in turns for m in t.messages for b in m.content
+        b
+        for t in turns
+        for m in t.messages
+        for b in m.content
         if isinstance(b, ToolResultBlock) and b.tool_use_id == tool_use_id
     )
 
@@ -274,8 +276,9 @@ async def test_sync_interrupted_resumes_blocking_inline(tmp_path: Path, monkeypa
         await store.append(
             Message(
                 role="assistant",
-                content=[ToolUseBlock(id="toolu_1", name="general-purpose",
-                                      input={"prompt": "do x"})],
+                content=[
+                    ToolUseBlock(id="toolu_1", name="general-purpose", input={"prompt": "do x"})
+                ],
             ),
             is_assistant=True,
         )
@@ -346,9 +349,7 @@ async def test_sync_interrupted_resumes_blocking_inline(tmp_path: Path, monkeypa
         tool = ResumeAgentTool(deps=deps)
 
         # 启动 execute(后台任务):sync 分支会阻塞在 runner.run() 等 proceed 放行
-        task = asyncio.create_task(
-            tool.execute(agent_id="sub-A", direction="继续把 a.txt 改成 X")
-        )
+        task = asyncio.create_task(tool.execute(agent_id="sub-A", direction="继续把 a.txt 改成 X"))
 
         # ===== ④ 断言:阻塞证明 + sync 分支 + inline 返回 =====
         # (a) run() 已启动(resume_subagent 抵达 sync 分支 await runner.run()),但 execute

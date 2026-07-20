@@ -5,6 +5,7 @@ Vertical 容器:question + N 预设 + "Type something." 合成一个 Static(#cp-
 末项选中 → Type something 行隐藏 + #choice_input(InputArea) 显示 + focus,在菜单里原地输入。
 InputArea 提交在容器内 @on+event.stop 捕获(不冒泡 app 主输入)。挂载后须 focus() 消费 BINDINGS。
 """
+
 from __future__ import annotations
 
 import unicodedata
@@ -71,7 +72,11 @@ class ChoicePrompt(Vertical):
     ]
 
     def __init__(
-        self, question: str, options: list[dict], *, on_result: Callable[[str], None],
+        self,
+        question: str,
+        options: list[dict],
+        *,
+        on_result: Callable[[str], None],
     ) -> None:
         super().__init__()
         self._question = question

@@ -36,7 +36,11 @@ class _SummaryProvider:
         return f"<analysis>draft</analysis><summary>{self._summary}</summary>"
 
     async def summarize_with_prefix(
-        self, *, prefix: list, instruction: str, max_tokens: int  # noqa: ANN001
+        self,
+        *,
+        prefix: list,
+        instruction: str,
+        max_tokens: int,  # noqa: ANN001
     ) -> str:
         # 与 complete 同语义(共享 _calls + 失败注入),供 _compact 新调用路径(复用 prefix 缓存)测试。
         self._calls += 1
@@ -186,14 +190,16 @@ def test_split_prefix_tail_handles_tool_result_blocks():
 
     cm = _cm()
     turns = [
-        Turn(messages=[
-            Message(role="user", content=[TextBlock(text="real question")]),
-            Message(role="assistant", content=[]),
-            Message(
-                role="user",
-                content=[ToolResultBlock(tool_use_id="t1", content="result blob" * 1000)],
-            ),
-        ]),
+        Turn(
+            messages=[
+                Message(role="user", content=[TextBlock(text="real question")]),
+                Message(role="assistant", content=[]),
+                Message(
+                    role="user",
+                    content=[ToolResultBlock(tool_use_id="t1", content="result blob" * 1000)],
+                ),
+            ]
+        ),
         Turn(messages=[Message(role="user", content=[TextBlock(text="tail q")])]),
     ]
     prefix, tail = cm._split_prefix_tail(turns)
@@ -209,13 +215,18 @@ def test_build_candidates_pairs_size_replaced_block():
 
     cm = _cm()
     turns = [
-        Turn(messages=[
-            Message(role="assistant", content=[ToolUseBlock(id="tu1", name="bash", input={})]),
-            Message(role="user", content=[
-                ToolResultBlock(tool_use_id="tu1", content="BIG" * 100),
-                ToolResultBlock(tool_use_id="tu2", content=_SNIP_PLACEHOLDER),  # 已占位
-            ]),
-        ]),
+        Turn(
+            messages=[
+                Message(role="assistant", content=[ToolUseBlock(id="tu1", name="bash", input={})]),
+                Message(
+                    role="user",
+                    content=[
+                        ToolResultBlock(tool_use_id="tu1", content="BIG" * 100),
+                        ToolResultBlock(tool_use_id="tu2", content=_SNIP_PLACEHOLDER),  # 已占位
+                    ],
+                ),
+            ]
+        ),
     ]
     cands = cm._build_candidates(turns)
     assert len(cands) == 2  # 仅 2 个 tool_result;tool_use 不产生候选
@@ -233,9 +244,17 @@ def _results_turn(*contents: str, start: int = 0) -> Turn:
     """构造一个含若干 tool_result 的 turn(id 从 start 起)。"""
     from birdcode.blocks import ToolResultBlock
 
-    return Turn(messages=[Message(role="user", content=[
-        ToolResultBlock(tool_use_id=f"t{start + i}", content=c) for i, c in enumerate(contents)
-    ])])
+    return Turn(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    ToolResultBlock(tool_use_id=f"t{start + i}", content=c)
+                    for i, c in enumerate(contents)
+                ],
+            )
+        ]
+    )
 
 
 async def test_snip_clears_largest_first_and_protects_last_turn():
@@ -269,17 +288,23 @@ async def test_snip_clears_only_largest_then_stops_at_clear_at_least():
     # old:t0(BIG)>t1(MID)>t2(SMALL) 为最旧 3 块(保护窗外、可清);
     # t3-t6 filler(最新 4 块)与 recent 一起填满保护集 5 → t0/t1/t2 snippable。
     old = _results_turn(
-        "B" * 50000, "M" * 10000, "S" * 2000,
-        "f" * 10, "f" * 10, "f" * 10, "f" * 10, start=0,
+        "B" * 50000,
+        "M" * 10000,
+        "S" * 2000,
+        "f" * 10,
+        "f" * 10,
+        "f" * 10,
+        "f" * 10,
+        start=0,
     )
     recent = _results_turn("w" * 1000, start=10)
     turns = [old, recent]
     res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
     assert res is not None and res.trigger == "snip"
     bo = old.messages[0].content
-    assert bo[0].content == _SNIP_PLACEHOLDER   # BIG(最大)被清
-    assert bo[1].content == "M" * 10000         # MID 保留(已满足最小量 → 停)
-    assert bo[2].content == "S" * 2000          # SMALL 保留
+    assert bo[0].content == _SNIP_PLACEHOLDER  # BIG(最大)被清
+    assert bo[1].content == "M" * 10000  # MID 保留(已满足最小量 → 停)
+    assert bo[2].content == "S" * 2000  # SMALL 保留
     assert recent.messages[0].content[0].content == "w" * 1000  # 保护集未动
 
 
@@ -300,9 +325,7 @@ async def test_snip_skips_blocks_smaller_than_placeholder():
     assert big_clearable >= _SNIP_CLEAR_AT_LEAST  # 大块单独够最小清理量
     # old:big + 200 个 tiny(最旧 → 在保护集外、snippable)+ 4 filler(被保护集补足)。
     # 保护集 = recent(1) + 按 recency 补到 _SNIP_KEEP(再取 4 个 old 最新的 filler)。
-    old = _results_turn(
-        big, *["a"] * 200, "f" * 10, "f" * 10, "f" * 10, "f" * 10, start=0
-    )
+    old = _results_turn(big, *["a"] * 200, "f" * 10, "f" * 10, "f" * 10, "f" * 10, start=0)
     recent = _results_turn("w" * 60_000, start=10)  # 受保护,撑大 pre_cold
     turns = [old, recent]
     pre_cold = est.estimate(history=turns, current=[], last_in=None)
@@ -414,13 +437,22 @@ async def test_snip_over_threshold_insufficient_goes_to_compact_sees_originals()
     # history[-1]=最后大 turn → 其 2 result 必保;按 recency 补足到 _SNIP_KEEP 后,
     # 最旧若干 result snippable,但总可清 << deficit → pre-check 失败 → _compact。
     turns = [
-        Turn(messages=[
-            Message(role="user", content=[TextBlock(text="q" * 150_000)]),
-            Message(role="user", content=[
-                ToolResultBlock(tool_use_id=f"t{i}a", content="ORIGINAL-RESULT" + "r" * 500),
-                ToolResultBlock(tool_use_id=f"t{i}b", content="ORIGINAL-RESULT" + "r" * 500),
-            ]),
-        ])
+        Turn(
+            messages=[
+                Message(role="user", content=[TextBlock(text="q" * 150_000)]),
+                Message(
+                    role="user",
+                    content=[
+                        ToolResultBlock(
+                            tool_use_id=f"t{i}a", content="ORIGINAL-RESULT" + "r" * 500
+                        ),
+                        ToolResultBlock(
+                            tool_use_id=f"t{i}b", content="ORIGINAL-RESULT" + "r" * 500
+                        ),
+                    ],
+                ),
+            ]
+        )
         for i in range(5)
     ]
     res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
@@ -428,10 +460,7 @@ async def test_snip_over_threshold_insufficient_goes_to_compact_sees_originals()
     assert p._calls >= 1  # 调了 LLM 摘要
     # 摘要看到的 prefix 含原文 tool_result,不含占位符(新路径未创建任何占位)
     assert p.seen_prefix is not None
-    seen = [
-        b.content for m in p.seen_prefix for b in m.content
-        if isinstance(b, ToolResultBlock)
-    ]
+    seen = [b.content for m in p.seen_prefix for b in m.content if isinstance(b, ToolResultBlock)]
     assert any("ORIGINAL-RESULT" in (c or "") for c in seen)
     assert not any(c == _SNIP_PLACEHOLDER for c in seen)
 
@@ -441,9 +470,7 @@ async def test_snip_no_tool_results_returns_none():
     cm = _cm()
     cm._stale_anchor = False
     turns = [_turn("q" * 100)]
-    res = await cm.maybe_compact(
-        history=turns, current=[], last_in=cm._tier1_threshold() + 100
-    )
+    res = await cm.maybe_compact(history=turns, current=[], last_in=cm._tier1_threshold() + 100)
     assert res is None
 
 
@@ -478,12 +505,22 @@ def test_protected_ids_keeps_whole_last_turn_and_topups_to_keep():
 
     cm = _cm()
     # old turn:3 个;recent turn:2 个(< _SNIP_KEEP=5)
-    old = Turn(messages=[Message(role="user", content=[
-        ToolResultBlock(tool_use_id=f"o{i}", content="x") for i in range(3)
-    ])])
-    recent = Turn(messages=[Message(role="user", content=[
-        ToolResultBlock(tool_use_id=f"r{i}", content="x") for i in range(2)
-    ])])
+    old = Turn(
+        messages=[
+            Message(
+                role="user",
+                content=[ToolResultBlock(tool_use_id=f"o{i}", content="x") for i in range(3)],
+            )
+        ]
+    )
+    recent = Turn(
+        messages=[
+            Message(
+                role="user",
+                content=[ToolResultBlock(tool_use_id=f"r{i}", content="x") for i in range(2)],
+            )
+        ]
+    )
     protected = cm._protected_ids([old, recent])
     # recent 全保(2)+ 从 old 补到 5(再取 3 个 old)= 5
     assert {"r0", "r1"} <= protected
@@ -496,9 +533,16 @@ def test_protected_ids_keeps_all_when_last_turn_exceeds_keep():
     from birdcode.blocks import ToolResultBlock
 
     cm = _cm()
-    recent = Turn(messages=[Message(role="user", content=[
-        ToolResultBlock(tool_use_id=f"r{i}", content="x") for i in range(_SNIP_KEEP + 3)
-    ])])
+    recent = Turn(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    ToolResultBlock(tool_use_id=f"r{i}", content="x") for i in range(_SNIP_KEEP + 3)
+                ],
+            )
+        ]
+    )
     protected = cm._protected_ids([recent])
     assert len(protected) == _SNIP_KEEP + 3  # 全保
 

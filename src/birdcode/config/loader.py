@@ -31,6 +31,7 @@ def expand_env_vars(value: object) -> object:
     对合并后的 raw dict 调用,在 model_validate 之前。
     """
     if isinstance(value, str):
+
         def _sub(m: re.Match[str]) -> str:
             name = m.group(1)
             val = os.environ.get(name)
@@ -38,6 +39,7 @@ def expand_env_vars(value: object) -> object:
                 log.warning("配置引用了未设置的环境变量 ${%s},替换为空串", name)
                 return ""
             return val
+
         out = _VAR_RE.sub(_sub, value)
         # ${MY-VAR}/${host.name}/${VAR-default} 等非 \w+ 名不会被 _VAR_RE 消费,原样残留→
         # 静默变成错误的认证串。显式告警(与「未设置变量」一致提示),避免晦涩失败。

@@ -1,5 +1,6 @@
 # src/birdcode/agents/report.py
 """子 agent 报告 / <task-notification> / toolUseResult 构造。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,7 +24,11 @@ class SubagentProgress:
 
 
 def build_task_notification(
-    report: SubagentReport, defn: AgentDefinition, *, agent_id: str, prompt: str,
+    report: SubagentReport,
+    defn: AgentDefinition,
+    *,
+    agent_id: str,
+    prompt: str,
     is_worktree: bool = False,
 ) -> str:
     """<task-notification> 文本(同步 tool_result 与异步注入共用同一构造)。
@@ -61,8 +66,12 @@ def _format_artifacts(report: SubagentReport, agent_id: str) -> str:
 
 
 def build_agent_tool_use_result(
-    report: SubagentReport, defn: AgentDefinition, *,
-    agent_id: str, prompt: str, is_async: bool,
+    report: SubagentReport,
+    defn: AgentDefinition,
+    *,
+    agent_id: str,
+    prompt: str,
+    is_async: bool,
 ) -> dict[str, Any]:
     """构造 AgentToolUseResult(供 ToolOutput.tool_use_result;不进 message.content/不发 LLM)。
 
@@ -70,16 +79,30 @@ def build_agent_tool_use_result(
     插件(model_config populate_by_name=True 在运行时同时接受两种写法)。
     """
     return AgentToolUseResult(
-        agentId=agent_id, agentType=defn.name, status=report.status, isAsync=is_async,
-        prompt=prompt, resolvedModel=None, content=report.text,
-        isCompleted=report.is_completed, outputFile=None, canReadOutputFile=False,
-        totalDurationMs=report.duration_ms, totalTokens=report.tokens,
-        totalToolUseCount=report.tool_use_count, usage=None, toolStats=None,
+        agentId=agent_id,
+        agentType=defn.name,
+        status=report.status,
+        isAsync=is_async,
+        prompt=prompt,
+        resolvedModel=None,
+        content=report.text,
+        isCompleted=report.is_completed,
+        outputFile=None,
+        canReadOutputFile=False,
+        totalDurationMs=report.duration_ms,
+        totalTokens=report.tokens,
+        totalToolUseCount=report.tool_use_count,
+        usage=None,
+        toolStats=None,
     ).model_dump(by_alias=True, exclude_none=True)
 
 
 def build_launch_tool_use_result(
-    defn: AgentDefinition, *, agent_id: str, prompt: str, output_file: str,
+    defn: AgentDefinition,
+    *,
+    agent_id: str,
+    prompt: str,
+    output_file: str,
 ) -> dict[str, Any]:
     """异步启动态 AgentToolUseResult:status=launched、content=None、output_file=侧链路径。
 
@@ -88,8 +111,19 @@ def build_launch_tool_use_result(
     完成统计全 None(尚未跑完)。与 build_agent_tool_use_result 同样用 alias 构造。
     """
     return AgentToolUseResult(
-        agentId=agent_id, agentType=defn.name, status="launched", isAsync=True,
-        prompt=prompt, resolvedModel=None, content=None, isCompleted=True,
-        outputFile=output_file, canReadOutputFile=False, totalDurationMs=None,
-        totalTokens=None, totalToolUseCount=None, usage=None, toolStats=None,
+        agentId=agent_id,
+        agentType=defn.name,
+        status="launched",
+        isAsync=True,
+        prompt=prompt,
+        resolvedModel=None,
+        content=None,
+        isCompleted=True,
+        outputFile=output_file,
+        canReadOutputFile=False,
+        totalDurationMs=None,
+        totalTokens=None,
+        totalToolUseCount=None,
+        usage=None,
+        toolStats=None,
     ).model_dump(by_alias=True, exclude_none=True)

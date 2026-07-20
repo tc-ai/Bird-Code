@@ -1,5 +1,6 @@
 # src/birdcode/agents/runner.py
 """子 agent 运行时:派生 → 跑 → 终止 → 报告销毁(同步,Phase1)。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -57,7 +58,10 @@ class ParentProvider(Protocol):
 
 
 def build_child_registry(
-    parent: ToolRegistry | None, disallowed: tuple[str, ...], *, is_async: bool = False,
+    parent: ToolRegistry | None,
+    disallowed: tuple[str, ...],
+    *,
+    is_async: bool = False,
     cwd: str | None = None,
 ) -> ToolRegistry:
     """子工具表 = 父 registry 减三类:agent tool、disallowed、会话级有状态工具。
@@ -115,7 +119,10 @@ def resolve_profile(
 
 
 def build_child_gate(
-    parent_gate: PermissionGate, *, allow_hitl: bool, worktree_dir: Path | None = None,
+    parent_gate: PermissionGate,
+    *,
+    allow_hitl: bool,
+    worktree_dir: Path | None = None,
 ) -> PermissionGate:
     """同步子 agent(allow_hitl=True):复用父 gate(L1-L5 全照常,含 HITL)。
     异步非 worktree(allow_hitl=False, worktree_dir=None):UiPermissionGate.fork_async()——
@@ -261,7 +268,10 @@ class SubagentRunner:
         self.resume_from = resume_from  # 非空 → resume 模式:加载侧链为 history、跳过播种
         self._worktree_name = worktree_store_name(ctx.cwd)  # 侧链与主会话同 worktree/<name>/
         self.sidechain_path = paths.subagent_jsonl_path(
-            self.root or paths.default_root(), ctx.session_id, project_root, self.agent_id,
+            self.root or paths.default_root(),
+            ctx.session_id,
+            project_root,
+            self.agent_id,
             worktree_name=self._worktree_name,
         )
 
@@ -269,7 +279,9 @@ class SubagentRunner:
         started = time.monotonic()
         meta_path = paths.subagent_meta_path(
             self.root or paths.default_root(),
-            self.ctx.session_id, self.project_root, self.agent_id,
+            self.ctx.session_id,
+            self.project_root,
+            self.agent_id,
             worktree_name=self._worktree_name,
         )
         # #3:续跑保留旧 meta(原任务描述/派生时间/worktree 起点),仅靠下方 _update_meta 刷 status;
@@ -282,11 +294,22 @@ class SubagentRunner:
             write_subagent_meta(
                 meta_path,
                 SubagentMeta(
-                    agentId=self.agent_id, agentType=self.defn.name, description=self.description,
-                    toolUseId=self.tool_use_id, spawnDepth=self.spawn_depth, isAsync=self.is_async,
-                    model=self.defn.model, status="launched", spawnedAt=utc_iso(),
-                    resolvedModel=None, completedAt=None, totalDurationMs=None, totalTokens=None,
-                    prompt=self.prompt, isolation=self.isolation, baseSha=None,
+                    agentId=self.agent_id,
+                    agentType=self.defn.name,
+                    description=self.description,
+                    toolUseId=self.tool_use_id,
+                    spawnDepth=self.spawn_depth,
+                    isAsync=self.is_async,
+                    model=self.defn.model,
+                    status="launched",
+                    spawnedAt=utc_iso(),
+                    resolvedModel=None,
+                    completedAt=None,
+                    totalDurationMs=None,
+                    totalTokens=None,
+                    prompt=self.prompt,
+                    isolation=self.isolation,
+                    baseSha=None,
                 ),
             )
         store = SubagentStore(self.ctx, self.project_root, self.agent_id, root=self.root)
@@ -323,19 +346,28 @@ class SubagentRunner:
                     try:
                         await self.progress_cb(
                             SubagentProgress(
-                                agent_id=self.agent_id, description=self.description,
-                                elapsed_ms=_elapsed_ms(started), input_tokens=state["input_tokens"],
-                                tool_use_count=state["tool_use_count"], phase="running",
+                                agent_id=self.agent_id,
+                                description=self.description,
+                                elapsed_ms=_elapsed_ms(started),
+                                input_tokens=state["input_tokens"],
+                                tool_use_count=state["tool_use_count"],
+                                phase="running",
                             )
                         )
                     except Exception:  # noqa: BLE001 - progress 是 best-effort,绝不杀子 agent
                         log.debug("subagent progress_cb 失败,忽略(不杀子 agent)", exc_info=True)
 
         async def _on_message(
-            msg: Message, *, usage: TokenUsage | None = None, stop_reason: str | None = None,
+            msg: Message,
+            *,
+            usage: TokenUsage | None = None,
+            stop_reason: str | None = None,
         ) -> None:
             await store.append(
-                msg, is_assistant=(msg.role == "assistant"), usage=usage, stop_reason=stop_reason,
+                msg,
+                is_assistant=(msg.role == "assistant"),
+                usage=usage,
+                stop_reason=stop_reason,
             )
 
         async def _progress_tick() -> None:
@@ -350,9 +382,12 @@ class SubagentRunner:
                 try:
                     await self.progress_cb(
                         SubagentProgress(
-                            agent_id=self.agent_id, description=self.description,
-                            elapsed_ms=_elapsed_ms(started), input_tokens=state["input_tokens"],
-                            tool_use_count=state["tool_use_count"], phase="running",
+                            agent_id=self.agent_id,
+                            description=self.description,
+                            elapsed_ms=_elapsed_ms(started),
+                            input_tokens=state["input_tokens"],
+                            tool_use_count=state["tool_use_count"],
+                            phase="running",
                         )
                     )
                 except Exception:  # noqa: BLE001 - tick best-effort,绝不杀子 agent
@@ -389,12 +424,15 @@ class SubagentRunner:
                 self.defn.model, self.model_override, self.cfg, self.parent_provider
             )
             child_registry = build_child_registry(
-                self.parent_registry, self.defn.disallowed_tools, is_async=self.is_async,
+                self.parent_registry,
+                self.defn.disallowed_tools,
+                is_async=self.is_async,
                 cwd=str(worktree_dir) if worktree_dir else None,
             )
             child_gate = (
                 build_child_gate(
-                    self.parent_gate, allow_hitl=self.is_sync,
+                    self.parent_gate,
+                    allow_hitl=self.is_sync,
                     worktree_dir=worktree_dir,
                 )
                 if self.parent_gate is not None
@@ -410,7 +448,9 @@ class SubagentRunner:
                 if callable(getter):
                     mcp_instructions = getter
             child_provider = build_provider(
-                profile, self.cfg, registry=child_registry,
+                profile,
+                self.cfg,
+                registry=child_registry,
                 system_override=_system_override(self.defn, self.isolation),
                 mcp_instructions=mcp_instructions,
             )
@@ -444,20 +484,30 @@ class SubagentRunner:
             # 一次性子 agent:跑一轮 run_agent_loop 到自然结束(无 tool_use)即止。
             # run_agent_loop 以 history 为只读先验上下文(context=child_context)。
             await run_agent_loop(
-                provider=child_provider, turn=turn, history=history,
-                executor=child_executor, emit=_emit, on_message=_on_message,
+                provider=child_provider,
+                turn=turn,
+                history=history,
+                executor=child_executor,
+                emit=_emit,
+                on_message=_on_message,
                 context=child_context,
             )
             if error_msg is not None:
                 # 护栏 / provider Error 终止:run_agent_loop 已正常 return,但子 agent 并未真正
                 # 完成。报 error + 把护栏消息回传主 agent(否则空正文被当成功)。
                 _update_meta(
-                    meta_path, status="error", completedAt=utc_iso(),
-                    totalDurationMs=_elapsed_ms(started), totalTokens=state["tokens"],
+                    meta_path,
+                    status="error",
+                    completedAt=utc_iso(),
+                    totalDurationMs=_elapsed_ms(started),
+                    totalTokens=state["tokens"],
                 )
                 report = SubagentReport(
-                    is_completed=False, text=f"子 agent 出错: {error_msg}", status="error",
-                    duration_ms=_elapsed_ms(started), tokens=state["tokens"],
+                    is_completed=False,
+                    text=f"子 agent 出错: {error_msg}",
+                    status="error",
+                    duration_ms=_elapsed_ms(started),
+                    tokens=state["tokens"],
                     tool_use_count=state["tool_use_count"],
                 )
             else:
@@ -465,31 +515,46 @@ class SubagentRunner:
                 is_completed = is_terminal_report_text(report_text)
                 duration = _elapsed_ms(started)
                 report = SubagentReport(
-                    is_completed=is_completed, text=report_text, status="completed",
-                    duration_ms=duration, tokens=state["tokens"],
+                    is_completed=is_completed,
+                    text=report_text,
+                    status="completed",
+                    duration_ms=duration,
+                    tokens=state["tokens"],
                     tool_use_count=state["tool_use_count"],
                 )
                 succeeded = True  # Phase 2:worktree cleanup 用(finally 不引用 report.status)
                 _update_meta(
-                    meta_path, status="completed", completedAt=utc_iso(),
+                    meta_path,
+                    status="completed",
+                    completedAt=utc_iso(),
                     resolvedModel=getattr(profile, "model", None),
-                    totalDurationMs=report.duration_ms, totalTokens=report.tokens,
+                    totalDurationMs=report.duration_ms,
+                    totalTokens=report.tokens,
                 )
         except asyncio.CancelledError:
             _update_meta(
-                meta_path, status="cancelled", completedAt=utc_iso(),
-                totalDurationMs=_elapsed_ms(started), totalTokens=state["tokens"],
+                meta_path,
+                status="cancelled",
+                completedAt=utc_iso(),
+                totalDurationMs=_elapsed_ms(started),
+                totalTokens=state["tokens"],
             )
             store.close()
             raise  # 同步:让取消继续上传到主 agent_loop
         except Exception as exc:  # noqa: BLE001
             _update_meta(
-                meta_path, status="error", completedAt=utc_iso(),
-                totalDurationMs=_elapsed_ms(started), totalTokens=state["tokens"],
+                meta_path,
+                status="error",
+                completedAt=utc_iso(),
+                totalDurationMs=_elapsed_ms(started),
+                totalTokens=state["tokens"],
             )
             report = SubagentReport(
-                is_completed=False, text=f"子 agent 异常: {exc}", status="error",
-                duration_ms=_elapsed_ms(started), tokens=state["tokens"],
+                is_completed=False,
+                text=f"子 agent 异常: {exc}",
+                status="error",
+                duration_ms=_elapsed_ms(started),
+                tokens=state["tokens"],
                 tool_use_count=state["tool_use_count"],
             )
         finally:
@@ -508,9 +573,7 @@ class SubagentRunner:
                 # 交付结果,不因取消被 _supervise 改写成 'cancelled';run_agent_loop 被取消
                 # (report None)→ 维持取消语义上传。
                 cleanup_task = asyncio.create_task(
-                    cleanup_subagent_worktree(
-                        self.project_root, worktree_dir, succeeded=succeeded
-                    )
+                    cleanup_subagent_worktree(self.project_root, worktree_dir, succeeded=succeeded)
                 )
                 try:
                     await asyncio.shield(cleanup_task)

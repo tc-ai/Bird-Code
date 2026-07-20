@@ -30,12 +30,7 @@ def test_parse_full(tmp_path: Path):
 def test_parse_scalar_disallowed_tools(tmp_path: Path):
     """YAML 标量 disallowed_tools: Write → 单元素元组,不逐字符(否则黑名单静默失效)。"""
     (tmp_path / "ro.md").write_text(
-        "---\n"
-        "name: ro\n"
-        "description: d\n"
-        "disallowed_tools: Write\n"
-        "---\n"
-        "SP\n",
+        "---\nname: ro\ndescription: d\ndisallowed_tools: Write\n---\nSP\n",
         encoding="utf-8",
     )
     d = load_md_agents(tmp_path, AgentSource.USER)[0]

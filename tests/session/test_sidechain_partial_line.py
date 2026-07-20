@@ -17,6 +17,7 @@ T3 已在 ``_read_jsonl_rows`` 用 ``except json.JSONDecodeError: continue`` 保
 - 仅半截行(无完整行)→ [] 而非抛错。
 - 末行半截 + 带尾换行(另一种坏 JSON 形态)亦跳过。
 """
+
 from __future__ import annotations
 
 import json
@@ -66,9 +67,7 @@ def test_partial_trailing_line_preserves_good_content(tmp_path: Path):
     assert len(turns) == 1
     msgs = turns[0].messages
     # 完整 user 行被解码,文本原样保留
-    user_texts = [
-        b.text for m in msgs for b in m.content if isinstance(b, TextBlock)
-    ]
+    user_texts = [b.text for m in msgs for b in m.content if isinstance(b, TextBlock)]
     assert "原任务" in user_texts
     # 半截 assistant 行被 _read_jsonl_rows 丢弃 → decode 看不到它 → 不产生残缺 block。
     # repair 会因末尾以 user 收尾而补一条合成 assistant(固定文案「已自动补全收尾」),
@@ -86,7 +85,8 @@ def test_multiple_good_lines_then_partial_keeps_all_good(tmp_path: Path):
     """多条完整行 + 末尾半截 → 所有完整行保留(半截只丢自己,不连累前序)。"""
     p = tmp_path / "agent-sub-1.jsonl"
     p.write_text(
-        _good_user_line("第一问") + "\n"
+        _good_user_line("第一问")
+        + "\n"
         + json.dumps(
             {
                 "type": "assistant",
@@ -98,15 +98,15 @@ def test_multiple_good_lines_then_partial_keeps_all_good(tmp_path: Path):
             ensure_ascii=False,
         )
         + "\n"
-        + _good_user_line("第二问") + "\n"
+        + _good_user_line("第二问")
+        + "\n"
         + _PARTIAL_ASSISTANT,
         encoding="utf-8",
     )
     turns = load_sidechain_turns(p)
     # 两轮完整提问(user-question 起 Turn)都应保留
     all_texts = [
-        b.text for t in turns for m in t.messages for b in m.content
-        if isinstance(b, TextBlock)
+        b.text for t in turns for m in t.messages for b in m.content if isinstance(b, TextBlock)
     ]
     assert "第一问" in all_texts
     assert "第一答" in all_texts

@@ -172,9 +172,7 @@ def _expand_includes(
             log.warning("@include 路径越界已拒绝: %s (base=%s, root=%s)", target, base, root)
             out.append(f"<!-- @include 路径越界已拒绝: {target} -->")
             continue
-        out.append(
-            _resolve_file(inc_path, root=root, visited=visited, depth=depth + 1, acc=acc)
-        )
+        out.append(_resolve_file(inc_path, root=root, visited=visited, depth=depth + 1, acc=acc))
     return "\n".join(out)
 
 

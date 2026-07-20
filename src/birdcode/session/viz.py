@@ -93,11 +93,13 @@ def parse_blocks(message: dict) -> list[Block]:
         if kind == "text":
             blocks.append(Block(kind="text", text=str(b.get("text", ""))))
         elif kind == "thinking":
-            blocks.append(Block(
-                kind="thinking",
-                text=str(b.get("text", "")),
-                sig=str(b.get("signature", "")),
-            ))
+            blocks.append(
+                Block(
+                    kind="thinking",
+                    text=str(b.get("text", "")),
+                    sig=str(b.get("signature", "")),
+                )
+            )
         elif kind == "tool_use":
             inp = b.get("input")
             blocks.append(
@@ -110,8 +112,12 @@ def parse_blocks(message: dict) -> list[Block]:
             )
         elif kind == "tool_result":
             blocks.append(
-                Block(kind="tool_result", tool_use_id=str(b.get("tool_use_id", "")),
-                      content=str(b.get("content", "")), is_error=bool(b.get("is_error", False)))
+                Block(
+                    kind="tool_result",
+                    tool_use_id=str(b.get("tool_use_id", "")),
+                    content=str(b.get("content", "")),
+                    is_error=bool(b.get("is_error", False)),
+                )
             )
     return blocks
 
@@ -121,7 +127,9 @@ def to_node(idx: int, raw: dict) -> Node:
     message = raw.get("message") if isinstance(raw.get("message"), dict) else {}
     cmd = raw.get("compactMetadata")
     return Node(
-        idx=idx, raw=raw, type=t,
+        idx=idx,
+        raw=raw,
+        type=t,
         uuid=str(raw.get("uuid", "")),
         parent_uuid=raw.get("parentUuid"),
         logical_parent_uuid=raw.get("logicalParentUuid"),
@@ -151,8 +159,11 @@ def summarize(node: Node) -> tuple[str, str]:
     if t == "user":
         if node.is_compact_summary:
             m = node.compact_meta or {}
-            return ("压缩摘要", f"pre={m.get('preTokens', '?')} post={m.get('postTokens', '?')} "
-                    f"trigger={m.get('trigger', '?')}")
+            return (
+                "压缩摘要",
+                f"pre={m.get('preTokens', '?')} post={m.get('postTokens', '?')} "
+                f"trigger={m.get('trigger', '?')}",
+            )
         if node.is_task_notif:
             txt = next((b.text for b in node.blocks if b.kind == "text"), "")
             return ("任务通知", preview(txt))
@@ -176,9 +187,11 @@ def summarize(node: Node) -> tuple[str, str]:
         return ("助手", "  ".join(parts) if parts else "(空)")
     if t == "system":
         m = node.compact_meta or {}
-        return (f"system · {node.subtype or '?'}",
-                f"trigger={m.get('trigger', '?')} pre={m.get('preTokens', '?')} "
-                f"post={m.get('postTokens', '?')} preserved={m.get('preservedMessages', '?')}")
+        return (
+            f"system · {node.subtype or '?'}",
+            f"trigger={m.get('trigger', '?')} pre={m.get('preTokens', '?')} "
+            f"post={m.get('postTokens', '?')} preserved={m.get('preservedMessages', '?')}",
+        )
     if t == "queue-operation":
         return (
             node.operation,
@@ -257,10 +270,7 @@ def render_block_full(b: Block) -> str:
         )
     if b.kind == "tool_result":
         tag = "ERROR" if b.is_error else "ok"
-        head = (
-            f"<p class='blk'><b>tool_result · {tag}</b>"
-            f" <code>↤ {esc(b.tool_use_id)}</code></p>"
-        )
+        head = f"<p class='blk'><b>tool_result · {tag}</b> <code>↤ {esc(b.tool_use_id)}</code></p>"
         return head + f"<pre class='blk-result'>{_format_body(b.content)}</pre>"
     return ""
 
@@ -577,48 +587,50 @@ def render_session_html(main_path: Path) -> str:
         for aid in attach.get(n.idx, []):
             parts.append(render_sidechain(sidechains[aid], aid))
     if standalone:
-        parts.append('<div class="sc-group"><div class="sc-group-head">🔀 未关联到主流程的子 agent '
-                     f'({len(standalone)})</div>'
-                     + "\n".join(
-                         render_sidechain(sidechains[a], a) for a in standalone
-                     )
-                     + "</div>")
+        parts.append(
+            '<div class="sc-group"><div class="sc-group-head">🔀 未关联到主流程的子 agent '
+            f"({len(standalone)})</div>"
+            + "\n".join(render_sidechain(sidechains[a], a) for a in standalone)
+            + "</div>"
+        )
 
     legend_items = "".join(
         f'<span class="lg" data-t="{esc(t)}">'
         f'<span class="d" style="background:{s["color"]}"></span>'
-        f'{s["icon"]} {s["label"]} <b>{counts.get(t, 0)}</b></span>'
+        f"{s['icon']} {s['label']} <b>{counts.get(t, 0)}</b></span>"
         for t, s in TYPE_STYLE.items()
     )
-    meta = (f"<b>文件:</b> {esc(str(main_path))} &nbsp;·&nbsp; "
-            f"<b>主流程:</b> {len(main_nodes)} 行 &nbsp;·&nbsp; "
-            f"<b>子 agent:</b> {len(sidechains)} &nbsp;·&nbsp; "
-            f"{' '.join(f'{k}:{v}' for k, v in counts.items())}")
+    meta = (
+        f"<b>文件:</b> {esc(str(main_path))} &nbsp;·&nbsp; "
+        f"<b>主流程:</b> {len(main_nodes)} 行 &nbsp;·&nbsp; "
+        f"<b>子 agent:</b> {len(sidechains)} &nbsp;·&nbsp; "
+        f"{' '.join(f'{k}:{v}' for k, v in counts.items())}"
+    )
     trunk = "\n".join(parts)
     title = f"BirdCode 会话: {main_path.stem}"
     return (
-        "<!doctype html>\n<html lang=\"zh\"><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        '<!doctype html>\n<html lang="zh"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f"<title>{esc(title)}</title>\n"
         "<script>try{document.documentElement.setAttribute('data-theme',"
         "localStorage.getItem('bc-theme')||'light');}catch(e){"
         "document.documentElement.setAttribute('data-theme','light');}</script>\n"
         f"<style>{CSS}</style></head>\n<body>\n"
-        "<header><div class=\"row\"><h1>🐦 BirdCode 会话执行流程树</h1>"
-        "<span class=\"ver\">v3 · 🔍搜索 ＋ 缩放 ＋ 迷你地图</span>"
-        "<input id=\"search\" type=\"search\" placeholder=\"🔍 搜索节点内容…\" />"
-        "<span id=\"search-count\"></span>"
-        "<span class=\"spacer\"></span>"
-        "<span class=\"zoom-ctrl\">"
-        "<button id=\"zoom-out\" title=\"缩小\">－</button>"
-        "<span id=\"zoom-level\">100%</span>"
-        "<button id=\"zoom-in\" title=\"放大\">＋</button>"
-        "<button id=\"zoom-reset\" title=\"重置\">⟳</button></span>"
-        "<button class=\"tog\">🌙</button></div>"
-        f"<div class=\"meta\">{meta}</div>"
-        f"<div class=\"legend\">{legend_items}</div></header>\n"
-        f"<main><div class=\"trunk\">\n{trunk}\n</div></main>\n"
-        "<aside id=\"minimap\"></aside>\n"
+        '<header><div class="row"><h1>🐦 BirdCode 会话执行流程树</h1>'
+        '<span class="ver">v3 · 🔍搜索 ＋ 缩放 ＋ 迷你地图</span>'
+        '<input id="search" type="search" placeholder="🔍 搜索节点内容…" />'
+        '<span id="search-count"></span>'
+        '<span class="spacer"></span>'
+        '<span class="zoom-ctrl">'
+        '<button id="zoom-out" title="缩小">－</button>'
+        '<span id="zoom-level">100%</span>'
+        '<button id="zoom-in" title="放大">＋</button>'
+        '<button id="zoom-reset" title="重置">⟳</button></span>'
+        '<button class="tog">🌙</button></div>'
+        f'<div class="meta">{meta}</div>'
+        f'<div class="legend">{legend_items}</div></header>\n'
+        f'<main><div class="trunk">\n{trunk}\n</div></main>\n'
+        '<aside id="minimap"></aside>\n'
         "<footer>每节点 = 一行 jsonl · 左侧时间线为主流程 · 橙色虚线分支为子 agent 侧链 · "
         "顶栏可搜索/缩放(或 Ctrl+滚轮) · 空白处可拖拽平移 · "
         "右侧迷你地图点击跳转 · 点节点「展开」看原始 JSON</footer>\n"

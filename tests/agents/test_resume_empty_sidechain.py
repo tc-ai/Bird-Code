@@ -19,6 +19,7 @@
 mock 范式抄 tests/agents/test_resume_crosscheck_completed.py(_FakeRegistry/_FakeManager/
 _FakeStore/_FakeController/替身 Runner),meta + sidechain 走真实文件读写。
 """
+
 from __future__ import annotations
 
 import json
@@ -84,7 +85,10 @@ class _FakeManager:
     """SubagentManager 替身:has_live + launch_async + 暴露 _store/_controller。"""
 
     def __init__(
-        self, *, store: _FakeStore | None = None, controller: _FakeController | None = None,
+        self,
+        *,
+        store: _FakeStore | None = None,
+        controller: _FakeController | None = None,
     ) -> None:
         self._store = store
         self._controller = controller
@@ -117,15 +121,24 @@ def _defn() -> AgentDefinition:
 
 
 def _write_meta(
-    tmp_path: Path, agent_id: str, *, status: str = "running", is_async: bool = True,
+    tmp_path: Path,
+    agent_id: str,
+    *,
+    status: str = "running",
+    is_async: bool = True,
     isolation: str | None = None,
 ) -> None:
     meta_path = subagent_meta_path(tmp_path, "s1", tmp_path, agent_id)
     write_subagent_meta(
         meta_path,
         SubagentMeta(
-            agentId=agent_id, agentType="general-purpose", description="旧任务",
-            toolUseId="(async-agent)", isAsync=is_async, status=status, isolation=isolation,
+            agentId=agent_id,
+            agentType="general-purpose",
+            description="旧任务",
+            toolUseId="(async-agent)",
+            isAsync=is_async,
+            status=status,
+            isolation=isolation,
         ),
     )
 
@@ -137,10 +150,12 @@ def _write_seed_only_sidechain(tmp_path: Path, agent_id: str) -> Path:
     必须跳过 synthetic 才能正确判 False。
     """
     p = subagent_jsonl_path(tmp_path, "s1", tmp_path, agent_id)
-    user_line = json.dumps({
-        "type": "user",
-        "message": {"role": "user", "content": [{"type": "text", "text": "种子任务"}]},
-    })
+    user_line = json.dumps(
+        {
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": "种子任务"}]},
+        }
+    )
     p.write_text(user_line + "\n", encoding="utf-8")
     return p
 
@@ -148,24 +163,38 @@ def _write_seed_only_sidechain(tmp_path: Path, agent_id: str) -> Path:
 def _write_real_assistant_sidechain(tmp_path: Path, agent_id: str, text: str) -> Path:
     """写一条含真实 assistant 产出的侧链(T18 应放行)。"""
     p = subagent_jsonl_path(tmp_path, "s1", tmp_path, agent_id)
-    user_line = json.dumps({
-        "type": "user",
-        "message": {"role": "user", "content": [{"type": "text", "text": "原任务"}]},
-    })
-    asst_line = json.dumps({
-        "type": "assistant",
-        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
-    })
+    user_line = json.dumps(
+        {
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": "原任务"}]},
+        }
+    )
+    asst_line = json.dumps(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+        }
+    )
     p.write_text("\n".join([user_line, asst_line]) + "\n", encoding="utf-8")
     return p
 
 
 def _deps(tmp_path: Path, *, manager: _FakeManager) -> ResumeDeps:
     return ResumeDeps(
-        manager=manager, root=tmp_path, session_id="s1", project_root=tmp_path,
-        worktree_name=None, agent_registry=_FakeRegistry(_defn()),
-        parent_provider=None, parent_registry=None, parent_gate=None, cfg=None, app=None,
-        ctx=None, spawn_depth=1, progress_cb=None,
+        manager=manager,
+        root=tmp_path,
+        session_id="s1",
+        project_root=tmp_path,
+        worktree_name=None,
+        agent_registry=_FakeRegistry(_defn()),
+        parent_provider=None,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=None,
+        app=None,
+        ctx=None,
+        spawn_depth=1,
+        progress_cb=None,
     )
 
 
@@ -174,7 +203,8 @@ def _deps(tmp_path: Path, *, manager: _FakeManager) -> ResumeDeps:
 
 @pytest.mark.asyncio
 async def test_seed_only_sidechain_returns_no_output(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """侧链只有种子 user、无任何真实 assistant 产出(子 agent 死太早)→ 不续跑,
     返回 ResumeResult(sync_done, text 含「无输出」)。
@@ -192,7 +222,9 @@ async def test_seed_only_sidechain_returns_no_output(
     monkeypatch.setattr(resume_mod, "SubagentRunner", _FakeRunner)
 
     result = await resume_subagent(
-        agent_id="sub-e1", direction="继续", deps=_deps(tmp_path, manager=mgr),
+        agent_id="sub-e1",
+        direction="继续",
+        deps=_deps(tmp_path, manager=mgr),
     )
 
     # 不续跑:未构造 runner、未 launch
@@ -212,7 +244,8 @@ async def test_seed_only_sidechain_returns_no_output(
 
 @pytest.mark.asyncio
 async def test_missing_sidechain_file_returns_no_output(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """侧链文件不存在(load_sidechain_turns 返回 [])→ 等价无 assistant 产出 → 「无输出」不续跑。
 
@@ -228,7 +261,9 @@ async def test_missing_sidechain_file_returns_no_output(
     monkeypatch.setattr(resume_mod, "SubagentRunner", _FakeRunner)
 
     result = await resume_subagent(
-        agent_id="sub-e2", direction="继续", deps=_deps(tmp_path, manager=mgr),
+        agent_id="sub-e2",
+        direction="继续",
+        deps=_deps(tmp_path, manager=mgr),
     )
 
     assert _FakeRunner.constructed == []
@@ -244,7 +279,8 @@ async def test_missing_sidechain_file_returns_no_output(
 
 @pytest.mark.asyncio
 async def test_real_assistant_output_passes_t18_and_dispatches(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """侧链含真实(非 synthetic)assistant 产出 → _has_assistant_output True → T18 不拦截,
     落到正常派发(构造 runner + launch_async)。
@@ -255,7 +291,9 @@ async def test_real_assistant_output_passes_t18_and_dispatches(
     _FakeRunner.constructed.clear()
     _write_meta(tmp_path, agent_id="sub-e3", status="running", is_async=True, isolation=None)
     _write_real_assistant_sidechain(
-        tmp_path, "sub-e3", text="## 待办清单\n- [ ] 还没做完",
+        tmp_path,
+        "sub-e3",
+        text="## 待办清单\n- [ ] 还没做完",
     )
 
     store = _FakeStore()
@@ -264,7 +302,9 @@ async def test_real_assistant_output_passes_t18_and_dispatches(
     monkeypatch.setattr(resume_mod, "SubagentRunner", _FakeRunner)
 
     result = await resume_subagent(
-        agent_id="sub-e3", direction="继续", deps=_deps(tmp_path, manager=mgr),
+        agent_id="sub-e3",
+        direction="继续",
+        deps=_deps(tmp_path, manager=mgr),
     )
 
     # T18 放行 → 构造 runner + launch
@@ -278,7 +318,8 @@ async def test_real_assistant_output_passes_t18_and_dispatches(
 
 @pytest.mark.asyncio
 async def test_sync_empty_sidechain_returns_no_output(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """sync(is_async=False)子 agent + 空侧链 → 同样不续跑(不调 runner.run()),
     返回「无输出」。T18 对 sync/async 统一生效。
@@ -293,7 +334,9 @@ async def test_sync_empty_sidechain_returns_no_output(
     monkeypatch.setattr(resume_mod, "SubagentRunner", _FakeRunner)
 
     result = await resume_subagent(
-        agent_id="sub-e4", direction="继续", deps=_deps(tmp_path, manager=mgr),
+        agent_id="sub-e4",
+        direction="继续",
+        deps=_deps(tmp_path, manager=mgr),
     )
 
     # sync 也未构造 runner、未 run(T18 在派发前拦截)

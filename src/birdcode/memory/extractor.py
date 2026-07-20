@@ -6,6 +6,7 @@
 
 串行(asyncio.Lock,防并发写冲突)+ 全程错误吞(绝不杀主循环)。
 """
+
 from __future__ import annotations
 
 import asyncio

@@ -10,8 +10,12 @@ def test_agent_defaults_preserved():
 
 def test_skill_fields_settable():
     d = AgentDefinition(
-        name="commit", description="d", system_prompt="",
-        mode="fork", is_transparent=True, body="steps $ARGUMENTS",
+        name="commit",
+        description="d",
+        system_prompt="",
+        mode="fork",
+        is_transparent=True,
+        body="steps $ARGUMENTS",
     )
     assert d.mode == "fork"
     assert d.is_transparent is True

@@ -9,6 +9,7 @@
 不依赖 test_resume_subagent.py 的私有桩:本文件自包含最小 ResumeDeps(manager 在 None 分支
 不会被调方法,故用最简 object 即可)。meta 缺失走真实 subagent_meta_path + read_subagent_meta。
 """
+
 from __future__ import annotations
 
 import json
@@ -45,7 +46,9 @@ def _deps(tmp_path: Path) -> ResumeDeps:
 async def test_resume_with_missing_meta_returns_friendly(tmp_path: Path):
     # 不写 meta 文件 → read_subagent_meta 返 None → resume_subagent 友好返回,不抛
     result = await resume_subagent(
-        agent_id="sub-gone", direction="继续", deps=_deps(tmp_path),
+        agent_id="sub-gone",
+        direction="继续",
+        deps=_deps(tmp_path),
     )
 
     assert result.outcome == "sync_done"

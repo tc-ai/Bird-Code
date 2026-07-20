@@ -34,12 +34,18 @@ def build_provider(
     """
     if profile.protocol == "anthropic":
         return AnthropicProvider(
-            profile, app, registry=registry,
-            mcp_instructions=mcp_instructions, system_override=system_override,
+            profile,
+            app,
+            registry=registry,
+            mcp_instructions=mcp_instructions,
+            system_override=system_override,
         )
     if profile.protocol == "openai":
         return OpenAIProvider(
-            profile, app, registry=registry,
-            mcp_instructions=mcp_instructions, system_override=system_override,
+            profile,
+            app,
+            registry=registry,
+            mcp_instructions=mcp_instructions,
+            system_override=system_override,
         )
     raise ValueError(f"未知 protocol: {profile.protocol!r}")

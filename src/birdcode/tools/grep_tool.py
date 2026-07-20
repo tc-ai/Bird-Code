@@ -114,8 +114,7 @@ class GrepTool(Tool):
             # 模型可 read_file(offset/limit) 分页读尾部(尾部不再丢失)。
             kept = lines[:head_limit]
             return ToolOutput(
-                text="\n".join(kept)
-                + f"\n... [已截断 — 共 {len(lines)} 行,显示前 {head_limit};"
+                text="\n".join(kept) + f"\n... [已截断 — 共 {len(lines)} 行,显示前 {head_limit};"
                 "用更精确的 pattern 或 glob 缩小范围] ...",
                 full="\n".join(lines),
             )

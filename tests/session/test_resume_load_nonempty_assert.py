@@ -5,6 +5,7 @@
 覆盖主会话(TurnController.resume)+ 侧链(load_sidechain_turns)两处。
 合法空会话(无 jsonl / 空文件 / 全可解 turns)不 warn。
 """
+
 from __future__ import annotations
 
 import json
@@ -59,9 +60,7 @@ async def test_resume_warns_when_history_empty_but_jsonl_nonempty(
     from birdcode.agent.mock_provider import MockProvider
     from birdcode.conversation import TurnController
 
-    ctx = SessionContext(
-        session_id="badload", cwd=str(tmp_path), version="0.1.0", git_branch=None
-    )
+    ctx = SessionContext(session_id="badload", cwd=str(tmp_path), version="0.1.0", git_branch=None)
     store = SessionStore(ctx, tmp_path, root=tmp_path)
     jf = tmp_path / paths.encode_cwd(tmp_path) / "badload.jsonl"
     _write_jsonl(jf, [_broken_user_row()])
@@ -98,9 +97,7 @@ async def test_resume_no_warn_when_jsonl_genuinely_empty(
     from birdcode.agent.mock_provider import MockProvider
     from birdcode.conversation import TurnController
 
-    ctx = SessionContext(
-        session_id="fresh", cwd=str(tmp_path), version="0.1.0", git_branch=None
-    )
+    ctx = SessionContext(session_id="fresh", cwd=str(tmp_path), version="0.1.0", git_branch=None)
     store = SessionStore(ctx, tmp_path, root=tmp_path)
     ctrl = TurnController(
         MockProvider(delay=0.0),

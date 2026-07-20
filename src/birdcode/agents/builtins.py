@@ -124,8 +124,6 @@ def build_capability_registry(
     merged = agents
     for defn in skills.all():
         if merged.resolve(defn.name) is not None:
-            raise CapabilityConflictError(
-                f"skill '{defn.name}'(.birdcode/skill/)与 agent 同名冲突"
-            )
+            raise CapabilityConflictError(f"skill '{defn.name}'(.birdcode/skill/)与 agent 同名冲突")
         merged.register(defn)
     return merged

@@ -157,9 +157,7 @@ def test_resolve_session_id_continue_and_resume_mutually_exclusive(tmp_path):
     from birdcode.cli.app import ProfileError, _resolve_session_id
 
     with pytest.raises(ProfileError):
-        _resolve_session_id(
-            continue_last=True, resume="abc", project_root=tmp_path, root=tmp_path
-        )
+        _resolve_session_id(continue_last=True, resume="abc", project_root=tmp_path, root=tmp_path)
 
 
 def test_resolve_session_id_resume_missing_file_raises(tmp_path):

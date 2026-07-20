@@ -1,5 +1,6 @@
 # tests/agents/test_phase1_e2e.py
 """Phase1 端到端:_AgentTool → SubagentRunner → 报告 → ToolOutput,全链(mock provider)。"""
+
 import pytest
 
 from birdcode.agent.provider import Done, TextDelta, TokenUsage
@@ -24,8 +25,11 @@ class _MockChildProvider:
 
 def _cfg():
     return AppConfig(
-        providers={"p": ProviderProfile(name="p", protocol="anthropic", model="m",
-                                        base_url="http://x", api_key="k")},
+        providers={
+            "p": ProviderProfile(
+                name="p", protocol="anthropic", model="m", base_url="http://x", api_key="k"
+            )
+        },
         default="p",
     )
 
@@ -37,7 +41,8 @@ def agent_tool(monkeypatch, tmp_path):
 
     monkeypatch.setattr(paths, "default_root", lambda: tmp_path)
     monkeypatch.setattr(
-        runner, "build_provider",
+        runner,
+        "build_provider",
         lambda profile, app, *, registry=None, system_override=None, mcp_instructions=None: (  # noqa: ARG005
             _MockChildProvider(profile)
         ),
@@ -46,10 +51,15 @@ def agent_tool(monkeypatch, tmp_path):
         name="explore", description="只读探索", system_prompt="SP", run_in_background=False
     )
     return _AgentTool(
-        defn=defn, cfg=_cfg(), app=None,
+        defn=defn,
+        cfg=_cfg(),
+        app=None,
         ctx=SessionContext(session_id="s1", cwd=".", version="", git_branch=None),
-        project_root=tmp_path, parent_provider=_MockChildProvider(_cfg().providers["p"]),
-        parent_registry=None, parent_gate=None, spawn_depth=0,
+        project_root=tmp_path,
+        parent_provider=_MockChildProvider(_cfg().providers["p"]),
+        parent_registry=None,
+        parent_gate=None,
+        spawn_depth=0,
     )
 
 

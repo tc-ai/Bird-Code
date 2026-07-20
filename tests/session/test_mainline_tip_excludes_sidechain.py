@@ -10,6 +10,7 @@ resume 选错 tip,真对话被孤儿丢失。BirdCode 对应四道防御(均已�
 
 锁定目标:防 T2>T1 时间戳竞争让 sidechain 夺 tip、或 queue-op(无 uuid)夺 tip。
 """
+
 import json
 from pathlib import Path
 
@@ -21,7 +22,10 @@ from birdcode.session.store import SessionStore
 
 def _ctx(sid="s1"):
     return SessionContext(
-        session_id=sid, cwd="C:/proj", version="0.1.0", git_branch="main",
+        session_id=sid,
+        cwd="C:/proj",
+        version="0.1.0",
+        git_branch="main",
     )
 
 
@@ -51,7 +55,8 @@ async def test_sidechain_rows_excluded_from_mainline_tip(tmp_path):
     store = _store(tmp_path)
     await store.append(Message(role="user", content=[TextBlock(text="主线问")]))
     mainline_tip_uuid = await store.append(
-        Message(role="assistant", content=[TextBlock(text="主线答")]), is_assistant=True,
+        Message(role="assistant", content=[TextBlock(text="主线答")]),
+        is_assistant=True,
     )
     store.close()
 
@@ -82,9 +87,7 @@ async def test_sidechain_rows_excluded_from_mainline_tip(tmp_path):
     assert s2._last_uuid == mainline_tip_uuid  # noqa: SLF001
     assert s2._last_uuid != sidechain_uuid  # noqa: SLF001
     # sidechain 行不出现在装载的 turns 中(被 _read_mainline_rows 跳过)
-    texts = [
-        b.text for t in turns for m in t.messages for b in m.content if hasattr(b, "text")
-    ]
+    texts = [b.text for t in turns for m in t.messages for b in m.content if hasattr(b, "text")]
     assert "主线答" in texts
     assert "子 agent 侧链消息" not in texts
 
@@ -99,7 +102,8 @@ async def test_tip_by_mainline_file_order_not_global_timestamp(tmp_path):
     store = _store(tmp_path)
     await store.append(Message(role="user", content=[TextBlock(text="T1主线问")]))
     mainline_tip_uuid = await store.append(
-        Message(role="assistant", content=[TextBlock(text="T1主线答")]), is_assistant=True,
+        Message(role="assistant", content=[TextBlock(text="T1主线答")]),
+        is_assistant=True,
     )
     store.close()
 
@@ -137,10 +141,14 @@ async def test_queue_operation_does_not_pollute_tip(tmp_path):
     store = _store(tmp_path)
     await store.append(Message(role="user", content=[TextBlock(text="主线提问")]))
     mainline_tip_uuid = await store.append(
-        Message(role="assistant", content=[TextBlock(text="主线答")]), is_assistant=True,
+        Message(role="assistant", content=[TextBlock(text="主线答")]),
+        is_assistant=True,
     )
     await store.append_queue_operation(
-        operation="enqueue", agent_id="a1", tool_use_id="call_x", status="completed",
+        operation="enqueue",
+        agent_id="a1",
+        tool_use_id="call_x",
+        status="completed",
     )
     # 写入侧:queue-op 后 store._last_uuid 不变(append_queue_operation 不推进)
     assert store._last_uuid == mainline_tip_uuid  # noqa: SLF001
@@ -164,7 +172,8 @@ async def test_subagent_store_always_marks_sidechain(tmp_path):
     sa = SubagentStore(_ctx(), tmp_path, "a1", root=tmp_path)
     await sa.append(Message(role="user", content=[TextBlock(text="子 agent 任务")]))
     await sa.append(
-        Message(role="assistant", content=[TextBlock(text="子 agent 答")]), is_assistant=True,
+        Message(role="assistant", content=[TextBlock(text="子 agent 答")]),
+        is_assistant=True,
     )
     sa.close()
 

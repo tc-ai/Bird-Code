@@ -31,7 +31,9 @@ async def test_append_then_load_mainline_roundtrip(tmp_path):
     await store.append(Message(role="user", content=[TextBlock(text="问")]))
     await store.append(
         Message(role="assistant", content=[TextBlock(text="答")]),
-        is_assistant=True, usage=TokenUsage(input_tokens=3), stop_reason="end_turn",
+        is_assistant=True,
+        usage=TokenUsage(input_tokens=3),
+        stop_reason="end_turn",
     )
     store.close()
 
@@ -49,7 +51,8 @@ async def test_append_chains_parent_uuid(tmp_path):
     store = _store(tmp_path)
     u1 = await store.append(Message(role="user", content=[TextBlock(text="a")]))
     a1 = await store.append(
-        Message(role="assistant", content=[TextBlock(text="b")]), is_assistant=True,
+        Message(role="assistant", content=[TextBlock(text="b")]),
+        is_assistant=True,
     )
     assert u1 is not None
     assert a1 is not None
@@ -69,9 +72,7 @@ async def test_load_skips_corrupt_line(tmp_path):
     store = _store(tmp_path)
     await store.append(Message(role="user", content=[TextBlock(text="问")]))
     # 配一条 assistant 收尾,避免 F3 把“无 assistant 跟随”的末尾 user 误判为 orphan。
-    await store.append(
-        Message(role="assistant", content=[TextBlock(text="答")]), is_assistant=True
-    )
+    await store.append(Message(role="assistant", content=[TextBlock(text="答")]), is_assistant=True)
     store.close()
     # 追加一行坏数据
     jf = _jsonl(tmp_path)
@@ -332,8 +333,7 @@ async def test_reopen_keeps_old_handle_open_when_new_init_fails(tmp_path, monkey
         if ln.strip()
     ]
     assert any(
-        r.get("message", {}).get("content", [{}])[0].get("text") == "after-fail"
-        for r in rows
+        r.get("message", {}).get("content", [{}])[0].get("text") == "after-fail" for r in rows
     )
 
 
@@ -345,9 +345,7 @@ async def test_load_mainline_skips_non_dict_json_line(tmp_path):
     store = _store(tmp_path)
     await store.append(Message(role="user", content=[TextBlock(text="问")]))
     # 配 assistant 收尾,避免 F3 把“无 assistant 跟随”的末尾 user 误判为 orphan。
-    await store.append(
-        Message(role="assistant", content=[TextBlock(text="答")]), is_assistant=True
-    )
+    await store.append(Message(role="assistant", content=[TextBlock(text="答")]), is_assistant=True)
     store.close()
     jf = _jsonl(tmp_path)
     with jf.open("a", encoding="utf-8") as f:
@@ -490,9 +488,7 @@ async def test_repair_persisted_survives_reresume(tmp_path):
     assert len(turns2) == 2
     msgs0 = turns2[0].messages
     use_ids = {b.id for m in msgs0 for b in m.content if isinstance(b, ToolUseBlock)}
-    res_ids = {
-        b.tool_use_id for m in msgs0 for b in m.content if isinstance(b, ToolResultBlock)
-    }
+    res_ids = {b.tool_use_id for m in msgs0 for b in m.content if isinstance(b, ToolResultBlock)}
     assert use_ids <= res_ids  # c1 已被合成 tool_result 配对
     assert msgs0[-1].role == "assistant"
     assert turns2[1].messages[0].content[0].text == "第二问"
@@ -535,7 +531,10 @@ async def test_append_compact_summary_parents_boundary(tmp_path):
     """摘要 user 行:parentUuid = 边界行 uuid,带 isCompactSummary=True。"""
     store = _store(tmp_path)
     buuid = await store.append_system_compact(
-        subtype="compact_boundary", logical_parent_uuid=None, content="x", compact_metadata={},
+        subtype="compact_boundary",
+        logical_parent_uuid=None,
+        content="x",
+        compact_metadata={},
     )
     suuid = await store.append_compact_summary(
         Message(role="user", content=[TextBlock(text="SUMMARY")])
@@ -553,7 +552,10 @@ async def test_load_mainline_truncates_at_last_boundary(tmp_path):
     store = _store(tmp_path)
     await store.append(Message(role="user", content=[TextBlock(text="OLD-BULK")]))
     await store.append_system_compact(
-        subtype="compact_boundary", logical_parent_uuid=None, content="c", compact_metadata={},
+        subtype="compact_boundary",
+        logical_parent_uuid=None,
+        content="c",
+        compact_metadata={},
     )
     await store.append_compact_summary(
         Message(role="user", content=[TextBlock(text="THE-SUMMARY")])
@@ -576,19 +578,21 @@ async def test_load_mainline_keeps_only_last_boundary_after_multiple_compactions
     # 第一次压缩前的 bulk
     await store.append(Message(role="user", content=[TextBlock(text="BULK-1")]))
     await store.append_system_compact(
-        subtype="compact_boundary", logical_parent_uuid=None, content="c1", compact_metadata={},
+        subtype="compact_boundary",
+        logical_parent_uuid=None,
+        content="c1",
+        compact_metadata={},
     )
-    await store.append_compact_summary(
-        Message(role="user", content=[TextBlock(text="SUMMARY-1")])
-    )
+    await store.append_compact_summary(Message(role="user", content=[TextBlock(text="SUMMARY-1")]))
     # 第二次压缩前的中段(在第一次摘要后、第二次边界前)
     await store.append(Message(role="user", content=[TextBlock(text="MID")]))
     await store.append_system_compact(
-        subtype="compact_boundary", logical_parent_uuid=None, content="c2", compact_metadata={},
+        subtype="compact_boundary",
+        logical_parent_uuid=None,
+        content="c2",
+        compact_metadata={},
     )
-    await store.append_compact_summary(
-        Message(role="user", content=[TextBlock(text="SUMMARY-2")])
-    )
+    await store.append_compact_summary(Message(role="user", content=[TextBlock(text="SUMMARY-2")]))
     # 尾段
     await store.append(Message(role="user", content=[TextBlock(text="tail")]))
     store.close()
@@ -608,9 +612,7 @@ async def test_load_mainline_no_boundary_loads_all(tmp_path):
     """无边界行 → 行为不变,全量装载(现状兼容)。"""
     store = _store(tmp_path)
     await store.append(Message(role="user", content=[TextBlock(text="问")]))
-    await store.append(
-        Message(role="assistant", content=[TextBlock(text="答")]), is_assistant=True
-    )
+    await store.append(Message(role="assistant", content=[TextBlock(text="答")]), is_assistant=True)
     store.close()
 
     s2 = SessionStore(_ctx("s1"), tmp_path, root=tmp_path)
@@ -627,7 +629,10 @@ async def test_append_system_compact_io_failure_does_not_raise(tmp_path):
     store._fh.close()  # noqa: SLF001 - 强制关闭句柄制造写失败
     # 不应抛异常
     await store.append_system_compact(
-        subtype="compact_boundary", logical_parent_uuid=None, content="x", compact_metadata={},
+        subtype="compact_boundary",
+        logical_parent_uuid=None,
+        content="x",
+        compact_metadata={},
     )
     store.close()
 
@@ -637,9 +642,7 @@ async def test_append_compact_summary_io_failure_does_not_raise(tmp_path):
     store = _store(tmp_path)
     store._fh.close()  # noqa: SLF001 - 强制关闭句柄制造写失败
     # 不应抛异常
-    await store.append_compact_summary(
-        Message(role="user", content=[TextBlock(text="S")])
-    )
+    await store.append_compact_summary(Message(role="user", content=[TextBlock(text="S")]))
     store.close()
 
 
@@ -648,11 +651,12 @@ async def test_load_mainline_after_resume_extends_correctly(tmp_path):
     store = _store(tmp_path)
     await store.append(Message(role="user", content=[TextBlock(text="OLD")]))
     await store.append_system_compact(
-        subtype="compact_boundary", logical_parent_uuid=None, content="c", compact_metadata={},
+        subtype="compact_boundary",
+        logical_parent_uuid=None,
+        content="c",
+        compact_metadata={},
     )
-    await store.append_compact_summary(
-        Message(role="user", content=[TextBlock(text="SUM")])
-    )
+    await store.append_compact_summary(Message(role="user", content=[TextBlock(text="SUM")]))
     store.close()
 
     # resume 后续聊
@@ -687,7 +691,8 @@ async def test_append_threads_tool_use_results_and_source(tmp_path):
 
     store = _store(tmp_path)
     await store.append(
-        Message(role="assistant", content=[TextBlock(text="派生")]), is_assistant=True,
+        Message(role="assistant", content=[TextBlock(text="派生")]),
+        is_assistant=True,
     )
     await store.append(
         Message(role="user", content=[ToolResultBlock(tool_use_id="call_x", content="done")]),
@@ -707,7 +712,8 @@ async def test_append_task_notification_skips_sidecar(tmp_path):
     await store.append(Message(role="user", content=[TextBlock(text="真提问")]))
     await store.append(
         Message(role="user", content=[TextBlock(text="<task-notification>x</task-notification>")]),
-        is_task_notification=True, agent_id="a1",
+        is_task_notification=True,
+        agent_id="a1",
     )
     store.close()
     data = json.loads(_meta(tmp_path).read_text(encoding="utf-8"))
@@ -722,7 +728,9 @@ async def test_append_queue_operation_writes_line(tmp_path):
     store = _store(tmp_path)
     prev_uuid = await store.append(Message(role="user", content=[TextBlock(text="q")]))
     await store.append_queue_operation(
-        operation="enqueue", agent_id="a1", tool_use_id="call_x",
+        operation="enqueue",
+        agent_id="a1",
+        tool_use_id="call_x",
         status="completed",
     )
     assert store._last_uuid == prev_uuid  # noqa: SLF001 - 事件行不进链
@@ -744,15 +752,19 @@ async def test_scan_excludes_task_notification_and_compact_summary(tmp_path):
     await store.append(Message(role="user", content=[TextBlock(text="真提问")]))
     await store.append(
         Message(role="user", content=[TextBlock(text="<task-notification>x</task-notification>")]),
-        is_task_notification=True, agent_id="a1",
+        is_task_notification=True,
+        agent_id="a1",
     )
     store.close()
     # 手动塞一条 isCompactSummary 行(模拟压缩摘要)
     jf = _jsonl(tmp_path)
     compact_line = {
-        "type": "user", "isCompactSummary": True,
+        "type": "user",
+        "isCompactSummary": True,
         "message": {"role": "user", "content": [{"type": "text", "text": "压缩摘要"}]},
-        "uuid": "x", "sessionId": "s1", "timestamp": "t",
+        "uuid": "x",
+        "sessionId": "s1",
+        "timestamp": "t",
     }
     with jf.open("a", encoding="utf-8") as f:
         f.write(json.dumps(compact_line, ensure_ascii=False) + "\n")
@@ -769,7 +781,8 @@ async def test_load_mainline_backfill_excludes_flagged_rows(tmp_path):
     await store.append(Message(role="assistant", content=[TextBlock(text="答")]), is_assistant=True)
     await store.append(
         Message(role="user", content=[TextBlock(text="<task-notification>x</task-notification>")]),
-        is_task_notification=True, agent_id="a1",
+        is_task_notification=True,
+        agent_id="a1",
     )
     store.close()
     _meta(tmp_path).unlink()  # 触发 load_mainline backfill
@@ -807,7 +820,8 @@ def test_count_excludes_sidechain_rows():
 
     rows = [
         {
-            "type": "user", "isSidechain": True,
+            "type": "user",
+            "isSidechain": True,
             "message": {"role": "user", "content": [{"type": "text", "text": "侧链"}]},
         },
         {
@@ -828,7 +842,9 @@ async def test_append_queue_operation_invalid_status_does_not_raise(tmp_path):
     store = _store(tmp_path)
     await store.append(Message(role="user", content=[TextBlock(text="q")]))
     await store.append_queue_operation(  # 不抛
-        operation="enqueue", agent_id="a1", tool_use_id="call_x",
+        operation="enqueue",
+        agent_id="a1",
+        tool_use_id="call_x",
         status="running",
     )
     store.close()
@@ -849,11 +865,12 @@ async def test_load_mainline_does_not_overwrite_existing_sidecar(tmp_path):
     )
     # 压缩:边界 + 摘要(都不更新 sidecar)
     await store.append_system_compact(
-        subtype="compact_boundary", logical_parent_uuid=None, content="c", compact_metadata={},
+        subtype="compact_boundary",
+        logical_parent_uuid=None,
+        content="c",
+        compact_metadata={},
     )
-    await store.append_compact_summary(
-        Message(role="user", content=[TextBlock(text="SUMMARY")])
-    )
+    await store.append_compact_summary(Message(role="user", content=[TextBlock(text="SUMMARY")]))
     store.close()
     # 压缩前 sidecar = 2 轮真实提问
     assert json.loads(_meta(tmp_path).read_text(encoding="utf-8"))["turn_count"] == 2
@@ -873,9 +890,7 @@ async def test_mainline_rows_returns_mainline_only(tmp_path):
     """mainline_rows() 返回主线行(跳过 sidechain/空/坏行),内容正确。"""
     store = _store(tmp_path)
     await store.append(Message(role="user", content=[TextBlock(text="问")]))
-    await store.append(
-        Message(role="assistant", content=[TextBlock(text="答")]), is_assistant=True
-    )
+    await store.append(Message(role="assistant", content=[TextBlock(text="答")]), is_assistant=True)
     store.close()
     s2 = SessionStore(_ctx("s1"), tmp_path, root=tmp_path)
     rows = s2.mainline_rows()
@@ -894,9 +909,12 @@ async def test_mainline_rows_skips_sidechain(tmp_path):
     # 手动塞一条 isSidechain 行(模拟侧链泄露进主 jsonl)
     jf = _jsonl(tmp_path)
     sidechain_line = {
-        "type": "user", "isSidechain": True,
+        "type": "user",
+        "isSidechain": True,
         "message": {"role": "user", "content": [{"type": "text", "text": "侧链"}]},
-        "uuid": "sc1", "sessionId": "s1", "timestamp": "t",
+        "uuid": "sc1",
+        "sessionId": "s1",
+        "timestamp": "t",
     }
     with jf.open("a", encoding="utf-8") as f:
         f.write(json.dumps(sidechain_line, ensure_ascii=False) + "\n")

@@ -90,8 +90,7 @@ class GlobTool(Tool):
                 str(p.relative_to(base)) if _is_relative(p, base) else str(p) for p in matched
             ]
             return ToolOutput(
-                text=cap_body
-                + f"\n... [已截断 — 共 {len(matched)} 条,限 {_GLOB_LIMIT};"
+                text=cap_body + f"\n... [已截断 — 共 {len(matched)} 条,限 {_GLOB_LIMIT};"
                 "用更具体的 pattern 缩小范围] ...",
                 full="\n".join(all_lines),
             )

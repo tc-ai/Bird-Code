@@ -8,6 +8,7 @@
 
 用 FakeRunner(monkeypatch SubagentRunner)隔离,只测 execute 的路由/透传,不测 SubagentRunner 内部。
 """
+
 from birdcode.tools.agent_tools import AgentToolInput
 
 
@@ -16,9 +17,17 @@ def _sync_defn():
     from birdcode.agents.definition import AgentDefinition
 
     return AgentDefinition(
-        name="t", description="t", system_prompt="", body="",
-        mode="fork", model="", disallowed_tools=(), kind="write",
-        parallel_safe=False, is_transparent=False, run_in_background=False,
+        name="t",
+        description="t",
+        system_prompt="",
+        body="",
+        mode="fork",
+        model="",
+        disallowed_tools=(),
+        kind="write",
+        parallel_safe=False,
+        is_transparent=False,
+        run_in_background=False,
     )
 
 
@@ -55,9 +64,16 @@ def _tool(mgr):
     from birdcode.tools.agent_tools import _AgentTool
 
     return _AgentTool(
-        defn=_sync_defn(), cfg=None, app=None, ctx=None, project_root=None,
-        parent_provider=None, parent_registry=None, parent_gate=None,
-        spawn_depth=0, subagent_mgr=mgr,
+        defn=_sync_defn(),
+        cfg=None,
+        app=None,
+        ctx=None,
+        project_root=None,
+        parent_provider=None,
+        parent_registry=None,
+        parent_gate=None,
+        spawn_depth=0,
+        subagent_mgr=mgr,
     )
 
 

@@ -6,6 +6,7 @@
 - AnthropicProvider.complete(messages.create 非流式,拼回 text blocks)。
 - OpenAIProvider.complete(chat.completions.create 非流式,取 choices[0].message.content)。
 """
+
 from types import SimpleNamespace
 
 from birdcode.agent.anthropic_provider import AnthropicProvider
@@ -51,8 +52,11 @@ class _CompleteAnthropic:
 
 def _anth_app():
     prof = ProviderProfile(
-        name="c", protocol="anthropic", model="claude-sonnet-4-5",
-        base_url="https://api.anthropic.com", api_key="k",
+        name="c",
+        protocol="anthropic",
+        model="claude-sonnet-4-5",
+        base_url="https://api.anthropic.com",
+        api_key="k",
     )
     return AppConfig(providers={"c": prof}, system_prompt="SYS"), prof
 
@@ -114,17 +118,18 @@ class _CompleteOpenAI:
 
 def _oai_app():
     prof = ProviderProfile(
-        name="d", protocol="openai", model="deepseek-reasoner",
-        base_url="https://api.deepseek.com", api_key="k",
+        name="d",
+        protocol="openai",
+        model="deepseek-reasoner",
+        base_url="https://api.deepseek.com",
+        api_key="k",
     )
     return AppConfig(providers={"d": prof}, system_prompt="SYS"), prof
 
 
 async def test_openai_complete_returns_message_content():
     """非流式 chat.completions.create:取 choices[0].message.content。"""
-    resp = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="THE ANSWER"))]
-    )
+    resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="THE ANSWER"))])
     app, prof = _oai_app()
     client = _CompleteOpenAI(resp)
     p = OpenAIProvider(prof, app, client=client)

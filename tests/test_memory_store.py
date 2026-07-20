@@ -1,4 +1,5 @@
 """记忆文件存储(frontmatter + slugify + 解析/序列化 + CRUD + 索引重建)测试。"""
+
 from __future__ import annotations
 
 import pytest
@@ -213,9 +214,7 @@ def test_parse_survives_triple_dash_in_values():
 
 def test_parse_survives_newline_triple_dash_in_description():
     # description 含 \n---\n:yaml 发出缩进续行 '  ---',列0 判定不误判为边界
-    text = serialize_memory(
-        name="x", description="line1\n---\nline2", type_="feedback", body="b"
-    )
+    text = serialize_memory(name="x", description="line1\n---\nline2", type_="feedback", body="b")
     parsed = parse_memory(text)
     assert parsed is not None
     fm, body = parsed

@@ -5,6 +5,7 @@
 resume 时 split_live_segment 找最后一条 compact_boundary 起(含)→ 末尾的段,
 更早的边界与被替代的 bulk 全丢;decode_lines 不把 system 行当对话 Turn。
 """
+
 from birdcode.session import codec
 from birdcode.session.models import SessionContext
 
@@ -13,27 +14,44 @@ CTX = SessionContext(session_id="s1", cwd=".", version="1", git_branch=None)
 
 def _u(text: str, uuid: str, parent: str | None) -> dict:
     return {
-        "type": "user", "uuid": uuid, "parentUuid": parent, "sessionId": "s1",
-        "timestamp": "2026-07-06T00:00:00.000Z", "isSidechain": False,
+        "type": "user",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": "s1",
+        "timestamp": "2026-07-06T00:00:00.000Z",
+        "isSidechain": False,
         "message": {"role": "user", "content": [{"type": "text", "text": text}]},
     }
 
 
 def _boundary(uuid: str, logical_parent: str) -> dict:
     return {
-        "type": "system", "subtype": "compact_boundary", "uuid": uuid,
-        "parentUuid": None, "logicalParentUuid": logical_parent, "sessionId": "s1",
-        "timestamp": "2026-07-06T00:00:00.000Z", "isSidechain": False,
+        "type": "system",
+        "subtype": "compact_boundary",
+        "uuid": uuid,
+        "parentUuid": None,
+        "logicalParentUuid": logical_parent,
+        "sessionId": "s1",
+        "timestamp": "2026-07-06T00:00:00.000Z",
+        "isSidechain": False,
         "content": "Conversation compacted",
-        "compactMetadata": {"trigger": "manual", "preTokens": 167000, "postTokens": 48000,
-                            "preservedMessages": {"uuids": []}},
+        "compactMetadata": {
+            "trigger": "manual",
+            "preTokens": 167000,
+            "postTokens": 48000,
+            "preservedMessages": {"uuids": []},
+        },
     }
 
 
 def _summary(uuid: str, parent: str) -> dict:
     return {
-        "type": "user", "uuid": uuid, "parentUuid": parent, "sessionId": "s1",
-        "timestamp": "2026-07-06T00:00:01.000Z", "isSidechain": False,
+        "type": "user",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": "s1",
+        "timestamp": "2026-07-06T00:00:01.000Z",
+        "isSidechain": False,
         "isCompactSummary": True,
         "message": {"role": "user", "content": [{"type": "text", "text": "SUMMARY..."}]},
     }
@@ -45,8 +63,12 @@ def test_encode_system_compact_boundary():
     校验:parentUuid=null、logicalParentUuid 续链、compactMetadata 落盘。
     """
     line = codec.encode_system_compact(
-        subtype="compact_boundary", uuid="b1", parent_uuid=None, ctx=CTX,
-        timestamp="2026-07-06T00:00:00.000Z", logical_parent_uuid="prev",
+        subtype="compact_boundary",
+        uuid="b1",
+        parent_uuid=None,
+        ctx=CTX,
+        timestamp="2026-07-06T00:00:00.000Z",
+        logical_parent_uuid="prev",
         content="Conversation compacted",
         compact_metadata={"trigger": "manual", "preTokens": 167000, "postTokens": 48000},
     )
@@ -67,8 +89,13 @@ def test_split_at_last_boundary_no_boundary_returns_all():
 
 def test_split_at_last_boundary_single():
     """一条边界:live = 边界行起(含)到末尾。"""
-    rows = [_u("old1", "1", None), _u("old2", "2", "1"),
-            _boundary("b1", "2"), _summary("s1", "b1"), _u("tail", "3", "s1")]
+    rows = [
+        _u("old1", "1", None),
+        _u("old2", "2", "1"),
+        _boundary("b1", "2"),
+        _summary("s1", "b1"),
+        _u("tail", "3", "s1"),
+    ]
     live = codec.split_live_segment(rows)
     uuids = [r["uuid"] for r in live]
     assert uuids == ["b1", "s1", "3"]  # old1/old2 被丢
@@ -78,9 +105,11 @@ def test_split_at_last_boundary_multiple_keeps_only_last():
     """多次 compaction:只留最后一条边界起的段;更早的边界与 bulk 全丢。"""
     rows = [
         _u("old1", "1", None),
-        _boundary("b1", "1"), _summary("s1", "b1"),
+        _boundary("b1", "1"),
+        _summary("s1", "b1"),
         _u("mid", "2", "s1"),
-        _boundary("b2", "2"), _summary("s2", "b2"),
+        _boundary("b2", "2"),
+        _summary("s2", "b2"),
         _u("tail", "3", "s2"),
     ]
     live = codec.split_live_segment(rows)
@@ -113,7 +142,10 @@ def test_decode_skips_system_boundary_metadata_only():
 def test_encode_system_compact_with_minimal_args_defaults():
     """无 compact_metadata / content 时使用默认值,仍能落合法 system 行。"""
     line = codec.encode_system_compact(
-        subtype="compact_boundary", uuid="b1", parent_uuid=None, ctx=CTX,
+        subtype="compact_boundary",
+        uuid="b1",
+        parent_uuid=None,
+        ctx=CTX,
         timestamp="2026-07-06T00:00:00.000Z",
     )
     assert line["type"] == "system"
@@ -125,7 +157,10 @@ def test_encode_system_compact_with_minimal_args_defaults():
 def test_encode_system_compact_preserves_ctx_fields():
     """encode_system_compact 仍写入 session 公共字段(cwd/version/git_branch)。"""
     line = codec.encode_system_compact(
-        subtype="compact_boundary", uuid="b1", parent_uuid=None, ctx=CTX,
+        subtype="compact_boundary",
+        uuid="b1",
+        parent_uuid=None,
+        ctx=CTX,
         timestamp="2026-07-06T00:00:00.000Z",
     )
     assert line["sessionId"] == "s1"

@@ -177,8 +177,11 @@ def _wt_cfg() -> AppConfig:
     return AppConfig(
         providers={
             "p": ProviderProfile(
-                name="p", protocol="anthropic", model="m",
-                base_url="http://x", api_key="k",
+                name="p",
+                protocol="anthropic",
+                model="m",
+                base_url="http://x",
+                api_key="k",
             )
         },
         default="p",
@@ -193,7 +196,12 @@ class _ParentProviderStub:
 
 
 def _fake_build_provider(  # noqa: ARG001
-    profile, app, *, registry=None, system_override=None, mcp_instructions=None,
+    profile,
+    app,
+    *,
+    registry=None,
+    system_override=None,
+    mcp_instructions=None,
 ):
     """避免真实 API:返回仅含 .profile 的桩(run_agent_loop 也被 mock,不会 stream)。"""
     return type("P", (), {"profile": profile})()
@@ -236,12 +244,22 @@ async def test_runner_worktree_isolation_writes_in_worktree(tmp_path, monkeypatc
     monkeypatch.setattr(runner, "run_agent_loop", _fake_loop)
 
     r = SubagentRunner(
-        defn=defn, prompt="写 output.txt", description="d", tool_use_id="call_wt",
-        model_override="", spawn_depth=1, is_async=False,
+        defn=defn,
+        prompt="写 output.txt",
+        description="d",
+        tool_use_id="call_wt",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
         isolation="worktree",
         parent_provider=_ParentProviderStub(cfg.providers["p"]),
-        parent_registry=None, parent_gate=None, cfg=cfg, app=None, ctx=ctx,
-        project_root=main, root=tmp_path,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=cfg,
+        app=None,
+        ctx=ctx,
+        project_root=main,
+        root=tmp_path,
     )
     report = await r.run()
 
@@ -257,6 +275,7 @@ async def test_runner_worktree_isolation_writes_in_worktree(tmp_path, monkeypatc
     assert not wt_dir.exists()
     # _AGENT_CWD 已复位(finally reset → None)
     from birdcode.agent.system_prompt.env import _AGENT_CWD
+
     assert _AGENT_CWD.get() is None
     # report completed
     assert report.status == "completed"
@@ -284,12 +303,22 @@ async def test_runner_worktree_kept_on_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "run_agent_loop", _boom_loop)
 
     r = SubagentRunner(
-        defn=defn, prompt="会崩", description="d", tool_use_id="call_wt2",
-        model_override="", spawn_depth=1, is_async=False,
+        defn=defn,
+        prompt="会崩",
+        description="d",
+        tool_use_id="call_wt2",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
         isolation="worktree",
         parent_provider=_ParentProviderStub(cfg.providers["p"]),
-        parent_registry=None, parent_gate=None, cfg=cfg, app=None, ctx=ctx,
-        project_root=main, root=tmp_path,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=cfg,
+        app=None,
+        ctx=ctx,
+        project_root=main,
+        root=tmp_path,
     )
     report = await r.run()
 
@@ -300,6 +329,7 @@ async def test_runner_worktree_kept_on_failure(tmp_path, monkeypatch):
     assert wt_dir.exists()
     # _AGENT_CWD 仍复位(finally reset 即使失败也跑)
     from birdcode.agent.system_prompt.env import _AGENT_CWD
+
     assert _AGENT_CWD.get() is None
 
 
@@ -335,11 +365,22 @@ async def test_runner_worktree_cleanup_cancel_preserves_completed_report(tmp_pat
     monkeypatch.setattr(runner, "cleanup_subagent_worktree", _blocking_cleanup)
 
     r = SubagentRunner(
-        defn=defn, prompt="ok", description="d", tool_use_id="call_c",
-        model_override="", spawn_depth=1, is_async=False, isolation="worktree",
+        defn=defn,
+        prompt="ok",
+        description="d",
+        tool_use_id="call_c",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
+        isolation="worktree",
         parent_provider=_ParentProviderStub(cfg.providers["p"]),
-        parent_registry=None, parent_gate=None, cfg=cfg, app=None, ctx=ctx,
-        project_root=main, root=tmp_path,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=cfg,
+        app=None,
+        ctx=ctx,
+        project_root=main,
+        root=tmp_path,
     )
     task = asyncio.create_task(r.run())
     await cleanup_entered.wait()  # 确认进入清理窗口(runner 悬在 shield 上)
@@ -350,9 +391,7 @@ async def test_runner_worktree_cleanup_cancel_preserves_completed_report(tmp_pat
 
 
 @pytest.mark.skipif(not _HAS_GIT, reason="git not installed")
-async def test_runner_worktree_cleanup_exception_preserves_completed_report(
-    tmp_path, monkeypatch
-):
+async def test_runner_worktree_cleanup_exception_preserves_completed_report(tmp_path, monkeypatch):
     """清理抛非取消异常(_run_git OSError/EMFILE/git 不可用)→ 不掩盖已完成报告(F2 完整版)。
 
     回归复审(04a546c):原外层 except 只接 CancelledError,cleanup 抛 OSError 时穿透 shield
@@ -379,11 +418,22 @@ async def test_runner_worktree_cleanup_exception_preserves_completed_report(
     monkeypatch.setattr(runner, "cleanup_subagent_worktree", _boom_cleanup)
 
     r = SubagentRunner(
-        defn=defn, prompt="ok", description="d", tool_use_id="call_e",
-        model_override="", spawn_depth=1, is_async=False, isolation="worktree",
+        defn=defn,
+        prompt="ok",
+        description="d",
+        tool_use_id="call_e",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
+        isolation="worktree",
         parent_provider=_ParentProviderStub(cfg.providers["p"]),
-        parent_registry=None, parent_gate=None, cfg=cfg, app=None, ctx=ctx,
-        project_root=main, root=tmp_path,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=cfg,
+        app=None,
+        ctx=ctx,
+        project_root=main,
+        root=tmp_path,
     )
     report = await r.run()
     assert report.status == "completed"  # 不被清理的 OSError 掩盖成 error

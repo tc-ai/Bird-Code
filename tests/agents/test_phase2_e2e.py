@@ -13,6 +13,7 @@
 
 时序:派发后用 _wait_until_live_drained / _wait_until_idle 轮询终态(不靠固定 sleep),稳定可复现。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -53,9 +54,7 @@ class _ChildProvider:
             if self._gate is not None:
                 await self._gate.wait()  # 挂起直到放行/取消
             yield TextDelta(text=self._text)
-            yield Done(
-                usage=TokenUsage(input_tokens=8, output_tokens=4), stop_reason="end_turn"
-            )
+            yield Done(usage=TokenUsage(input_tokens=8, output_tokens=4), stop_reason="end_turn")
 
         return _gen()
 
@@ -70,9 +69,7 @@ class _MainProvider:
     def stream(self, messages, *, history):  # noqa: ARG002
         async def _gen():
             yield TextDelta(text=self._text)
-            yield Done(
-                usage=TokenUsage(input_tokens=5, output_tokens=3), stop_reason="end_turn"
-            )
+            yield Done(usage=TokenUsage(input_tokens=5, output_tokens=3), stop_reason="end_turn")
 
         return _gen()
 
@@ -98,9 +95,7 @@ def _cfg() -> AppConfig:
 
 
 def _make_store(tmp_path, session_id: str) -> SessionStore:
-    ctx = SessionContext(
-        session_id=session_id, cwd=str(tmp_path), version="0.1.0", git_branch=None
-    )
+    ctx = SessionContext(session_id=session_id, cwd=str(tmp_path), version="0.1.0", git_branch=None)
     return SessionStore(ctx, tmp_path, root=tmp_path)
 
 
@@ -108,7 +103,9 @@ def _registry() -> AgentRegistry:
     r = AgentRegistry()
     r.register(
         AgentDefinition(
-            name="general-purpose", description="通用子 agent", system_prompt="SP",
+            name="general-purpose",
+            description="通用子 agent",
+            system_prompt="SP",
             run_in_background=True,
         )
     )
@@ -325,9 +322,7 @@ async def test_e2e_resume_reinjects_pending_notification(tmp_path, monkeypatch):
     main_provider = _MainProvider(cfg.providers["p"])
 
     # 会话 1:写一条 enqueue 后崩溃(无 user 行、无 dequeue)
-    notif_text = (
-        "<task-notification>\n子 agent 完成(crash 前已 enqueue)\n</task-notification>"
-    )
+    notif_text = "<task-notification>\n子 agent 完成(crash 前已 enqueue)\n</task-notification>"
     store1 = _make_store(tmp_path, "resume1")
     await store1.append_queue_operation(
         operation="enqueue",

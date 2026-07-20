@@ -104,6 +104,6 @@ class ToolRegistry:
             lines.append(f"- {t.name} — {desc}" if desc else f"- {t.name}")
         if not lines:
             return ""
-        return (
-            "以下延迟工具可用(完整 schema 未加载,需要时用 tool_search 拉取):\n" + "\n".join(lines)
+        return "以下延迟工具可用(完整 schema 未加载,需要时用 tool_search 拉取):\n" + "\n".join(
+            lines
         )

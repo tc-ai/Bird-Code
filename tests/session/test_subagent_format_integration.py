@@ -3,6 +3,7 @@
 覆盖:同步结果行 / 异步(回执+queue-op+注入) / pending 识别 / 子 agent 侧链日志 /
 子 agent meta.json / 主线 load 不受侧链影响。
 """
+
 import json
 
 from birdcode.blocks import TextBlock, ToolResultBlock, ToolUseBlock
@@ -35,15 +36,18 @@ async def test_sync_subagent_result_format(tmp_path):
         ),
         is_assistant=True,
     )
-    tur = (
-        AgentToolUseResult(
-            agent_id="a1", agent_type="general-purpose", status="completed",
-            is_async=False, content="done", total_tokens=10,
-        ).model_dump(by_alias=True, exclude_none=True)
-    )
+    tur = AgentToolUseResult(
+        agent_id="a1",
+        agent_type="general-purpose",
+        status="completed",
+        is_async=False,
+        content="done",
+        total_tokens=10,
+    ).model_dump(by_alias=True, exclude_none=True)
     await store.append(
         Message(role="user", content=[ToolResultBlock(tool_use_id="call_x", content="done")]),
-        tool_use_results={"call_x": tur}, source_tool_assistant_uuid=spawn_uuid,
+        tool_use_results={"call_x": tur},
+        source_tool_assistant_uuid=spawn_uuid,
     )
     store.close()
     rows = _main_rows(tmp_path)
@@ -62,19 +66,21 @@ async def test_async_subagent_lifecycle_and_pending(tmp_path):
             role="assistant",
             content=[
                 ToolUseBlock(
-                    id="call_y", name="Agent",
+                    id="call_y",
+                    name="Agent",
                     input={"prompt": "go"},
                 )
             ],
         ),
         is_assistant=True,
     )
-    ack = (
-        AgentToolUseResult(
-            agent_id="a2", status="launched", is_async=True,
-            output_file="/tmp/a2.txt", can_read_output_file=True,
-        ).model_dump(by_alias=True, exclude_none=True)
-    )
+    ack = AgentToolUseResult(
+        agent_id="a2",
+        status="launched",
+        is_async=True,
+        output_file="/tmp/a2.txt",
+        can_read_output_file=True,
+    ).model_dump(by_alias=True, exclude_none=True)
     await store.append(
         Message(
             role="user",
@@ -89,7 +95,9 @@ async def test_async_subagent_lifecycle_and_pending(tmp_path):
     )
     # 子 agent 完成 → queue-op
     await store.append_queue_operation(
-        operation="enqueue", agent_id="a2", tool_use_id="call_y",
+        operation="enqueue",
+        agent_id="a2",
+        tool_use_id="call_y",
         status="completed",
     )
 
@@ -106,7 +114,8 @@ async def test_async_subagent_lifecycle_and_pending(tmp_path):
                 TextBlock(text="<task-notification><task-id>a2</task-id></task-notification>")
             ],
         ),
-        is_task_notification=True, agent_id="a2",
+        is_task_notification=True,
+        agent_id="a2",
     )
     store.close()
     assert codec.find_pending_notifications(_main_rows(tmp_path)) == []

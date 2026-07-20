@@ -47,7 +47,7 @@ class ToolSearchTool(Tool):
 
     async def execute(self, query: str) -> str:  # type: ignore[override]
         if query.startswith("select:"):
-            name = query[len("select:"):].strip()
+            name = query[len("select:") :].strip()
             t = self._registry.get(name)
             if t is not None and t.should_defer():
                 self._registry.mark_discovered(name)

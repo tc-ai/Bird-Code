@@ -4,6 +4,7 @@
 query_one/display/focus 等 UI 行为需 mount(Textual run_test),留手动验证;此处测不依赖
 mount 的逻辑(_menu_text 用 size 兜底 80、sel/choose/_on_inner_submitted 不 query_one 或静默)。
 """
+
 from birdcode.ui.widgets.choice_prompt import ChoicePrompt
 
 

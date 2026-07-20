@@ -6,6 +6,7 @@ Phase 1:多终端并行(--worktree CLI + auto-detect)。git 调用走 asyncio.su
 worktree 里 `.git` 是**文件**(内容 `gitdir: <main>/.git/worktrees/<name>`),
 主仓库里 `.git` 是**目录**——这是 is_worktree / resolve_main_repo 的判据。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -44,7 +45,7 @@ def is_worktree(path: Path) -> bool:
         return False
     if not text.startswith("gitdir:"):
         return False
-    gitdir = text[len("gitdir:"):].strip().replace("\\", "/")
+    gitdir = text[len("gitdir:") :].strip().replace("\\", "/")
     return "/worktrees/" in gitdir
 
 
@@ -77,7 +78,7 @@ def resolve_main_repo(worktree_path: Path) -> Path | None:
         return None
     if not text.startswith("gitdir:"):
         return None
-    gitdir = Path(text[len("gitdir:"):].strip())
+    gitdir = Path(text[len("gitdir:") :].strip())
     if not gitdir.is_absolute():
         gitdir = worktree_path / gitdir
     try:
@@ -151,7 +152,7 @@ def _read_worktree_head_ref(wt: Path) -> str | None:
         return None
     if not text.startswith("gitdir:"):
         return None
-    gitdir = Path(text[len("gitdir:"):].strip())
+    gitdir = Path(text[len("gitdir:") :].strip())
     if not gitdir.is_absolute():
         gitdir = wt / gitdir
     try:
@@ -160,13 +161,11 @@ def _read_worktree_head_ref(wt: Path) -> str | None:
         return None
     prefix = "ref: refs/heads/"
     if head.startswith(prefix):
-        return head[len(prefix):].strip()
+        return head[len(prefix) :].strip()
     return None
 
 
-async def create_worktree(
-    main_repo: Path, name: str, *, base_ref: str = "origin/HEAD"
-) -> Path:
+async def create_worktree(main_repo: Path, name: str, *, base_ref: str = "origin/HEAD") -> Path:
     """在 <main_repo>/.birdcode/worktrees/<name> 建 worktree,分支 worktree-<name>。
 
     快速恢复:dir 已存在 + 合法 worktree + 在 worktree-<name> 分支 → 直接复用(跳过 git,
@@ -177,9 +176,7 @@ async def create_worktree(
     超时(rc=128,err="git 超时")【不】回退 HEAD(超时不是缺 ref,回退会 double 挂)。
     """
     if not (main_repo / ".git").exists():
-        raise RuntimeError(
-            f"--worktree 需在 git 仓库内使用: {main_repo} 无 .git"
-        )
+        raise RuntimeError(f"--worktree 需在 git 仓库内使用: {main_repo} 无 .git")
     wt = worktree_path(main_repo, name)
     branch = f"worktree-{name}"
     # 快速恢复:dir 在 + HEAD==worktree-<name> → 复用(不调 git);dir 在但状态不符 → 报错
@@ -190,13 +187,9 @@ async def create_worktree(
             f"worktree 已存在但状态不符(期望分支 {branch}): {wt}——切回/删除后重试"
         )
     # 分支已存在 → checkout 复用(不 -b);不存在 → -b 新建
-    rc_v, _, _ = await _run_git(
-        ["rev-parse", "--verify", f"refs/heads/{branch}"], cwd=main_repo
-    )
+    rc_v, _, _ = await _run_git(["rev-parse", "--verify", f"refs/heads/{branch}"], cwd=main_repo)
     if rc_v == 0:
-        rc, out, err = await _run_git(
-            ["worktree", "add", str(wt), branch], cwd=main_repo
-        )
+        rc, out, err = await _run_git(["worktree", "add", str(wt), branch], cwd=main_repo)
     else:
         rc, out, err = await _run_git(
             ["worktree", "add", "-b", branch, str(wt), base_ref], cwd=main_repo
@@ -222,11 +215,11 @@ async def list_worktrees(main_repo: Path) -> list[dict[str, str]]:
         if line.startswith("worktree "):
             if cur:
                 rows.append(cur)
-            cur = {"path": line[len("worktree "):]}
+            cur = {"path": line[len("worktree ") :]}
         elif line.startswith("branch "):
-            cur["branch"] = line[len("branch "):]
+            cur["branch"] = line[len("branch ") :]
         elif line.startswith("HEAD "):
-            cur["head"] = line[len("HEAD "):]
+            cur["head"] = line[len("HEAD ") :]
         elif line == "" and cur:
             rows.append(cur)
             cur = {}
@@ -280,9 +273,7 @@ async def remove_worktree(main_repo: Path, wt: Path, *, force: bool = False) -> 
 
 async def lock_worktree(main_repo: Path, wt: Path, reason: str) -> None:
     """锁 worktree 防误删(prune/自动清理)。失败(已锁)仅 debug。"""
-    rc, _, err = await _run_git(
-        ["worktree", "lock", str(wt), "--reason", reason], cwd=main_repo
-    )
+    rc, _, err = await _run_git(["worktree", "lock", str(wt), "--reason", reason], cwd=main_repo)
     if rc != 0:
         log.debug("worktree lock 失败(可能已锁): %s", err.strip())
 
@@ -296,9 +287,7 @@ async def prune_worktrees(main_repo: Path) -> None:
     await _run_git(["worktree", "prune"], cwd=main_repo)
 
 
-async def cleanup_subagent_worktree(
-    main_repo: Path, wt: Path, *, succeeded: bool
-) -> None:
+async def cleanup_subagent_worktree(main_repo: Path, wt: Path, *, succeeded: bool) -> None:
     """子 agent worktree 清理。绝不无脑 branch -D(防丢未合并 commit)。
 
     - failed → unlock + 留目录 + 留分支(回报主 agent 定夺,不毁活)。

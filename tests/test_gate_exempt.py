@@ -1,5 +1,6 @@
 # tests/test_gate_exempt.py
 """S2/#3:gate_exempt 工具跳过权限 gate(team 工具全内存操作,无 FS/命令副作用,安全)。"""
+
 from pydantic import BaseModel
 
 from birdcode.blocks import ToolUseBlock

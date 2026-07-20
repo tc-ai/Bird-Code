@@ -4,6 +4,7 @@
 对标 Claude Code 的 ~/.claude/projects/<encoded-cwd>/ 布局。
 encoded-cwd 把工作目录路径里的分隔符(/ \\ :)和盘符冒号折成 '-'。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -27,7 +28,10 @@ def default_root() -> Path:
 
 
 def sessions_dir(
-    root: Path, project_root: Path, *, worktree_name: str | None = None,
+    root: Path,
+    project_root: Path,
+    *,
+    worktree_name: str | None = None,
 ) -> Path:
     """本项目所有会话的父目录:<root>/<encoded-cwd>/[worktree/<name>/](per-worktree 隔离)。"""
     d = root / encode_cwd(project_root)
@@ -35,58 +39,89 @@ def sessions_dir(
 
 
 def session_jsonl(
-    root: Path, session_id: str, project_root: Path, *, worktree_name: str | None = None,
+    root: Path,
+    session_id: str,
+    project_root: Path,
+    *,
+    worktree_name: str | None = None,
 ) -> Path:
     """主会话日志:<root>/<encoded>/[worktree/<name>/]<sessionId>.jsonl。"""
     return sessions_dir(root, project_root, worktree_name=worktree_name) / f"{session_id}.jsonl"
 
 
 def session_dir(
-    root: Path, session_id: str, project_root: Path, *, worktree_name: str | None = None,
+    root: Path,
+    session_id: str,
+    project_root: Path,
+    *,
+    worktree_name: str | None = None,
 ) -> Path:
     """同名资源目录:<root>/<encoded>/[worktree/<name>/]<sessionId>/。"""
     return sessions_dir(root, project_root, worktree_name=worktree_name) / session_id
 
 
 def tool_results_dir(
-    root: Path, session_id: str, project_root: Path, *, worktree_name: str | None = None,
+    root: Path,
+    session_id: str,
+    project_root: Path,
+    *,
+    worktree_name: str | None = None,
 ) -> Path:
     """工具输出外存:<...>/<sessionId>/tool-results/。"""
     return session_dir(root, session_id, project_root, worktree_name=worktree_name) / "tool-results"
 
 
 def tool_result_path(
-    root: Path, session_id: str, project_root: Path, tool_use_id: str,
-    *, worktree_name: str | None = None,
+    root: Path,
+    session_id: str,
+    project_root: Path,
+    tool_use_id: str,
+    *,
+    worktree_name: str | None = None,
 ) -> Path:
     """单个工具输出落盘:<...>/tool-results/<tool_use_id>.txt。"""
-    return tool_results_dir(
-        root, session_id, project_root, worktree_name=worktree_name
-    ) / f"{tool_use_id}.txt"
+    return (
+        tool_results_dir(root, session_id, project_root, worktree_name=worktree_name)
+        / f"{tool_use_id}.txt"
+    )
 
 
 def subagents_dir(
-    root: Path, session_id: str, project_root: Path, *, worktree_name: str | None = None,
+    root: Path,
+    session_id: str,
+    project_root: Path,
+    *,
+    worktree_name: str | None = None,
 ) -> Path:
     """子 agent 外存目录:<...>/<sessionId>/subagents/(与 tool-results 同构)。"""
     return session_dir(root, session_id, project_root, worktree_name=worktree_name) / "subagents"
 
 
 def subagent_jsonl_path(
-    root: Path, session_id: str, project_root: Path, agent_id: str,
-    *, worktree_name: str | None = None,
+    root: Path,
+    session_id: str,
+    project_root: Path,
+    agent_id: str,
+    *,
+    worktree_name: str | None = None,
 ) -> Path:
     """单个子 agent 会话日志:<...>/subagents/agent-<agent_id>.jsonl。"""
-    return subagents_dir(
-        root, session_id, project_root, worktree_name=worktree_name
-    ) / f"agent-{agent_id}.jsonl"
+    return (
+        subagents_dir(root, session_id, project_root, worktree_name=worktree_name)
+        / f"agent-{agent_id}.jsonl"
+    )
 
 
 def subagent_meta_path(
-    root: Path, session_id: str, project_root: Path, agent_id: str,
-    *, worktree_name: str | None = None,
+    root: Path,
+    session_id: str,
+    project_root: Path,
+    agent_id: str,
+    *,
+    worktree_name: str | None = None,
 ) -> Path:
     """单个子 agent 元数据:<...>/subagents/agent-<agent_id>.meta.json(唯一可变)。"""
-    return subagents_dir(
-        root, session_id, project_root, worktree_name=worktree_name
-    ) / f"agent-{agent_id}.meta.json"
+    return (
+        subagents_dir(root, session_id, project_root, worktree_name=worktree_name)
+        / f"agent-{agent_id}.meta.json"
+    )

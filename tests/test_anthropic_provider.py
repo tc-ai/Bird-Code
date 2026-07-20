@@ -90,9 +90,7 @@ async def test_system_param_and_thinking_kwarg_when_configured():
     p = AnthropicProvider(prof, app, client=client)
     _ = [e async for e in p.stream([Message(role="user", content=[TextBlock("x")])], history=[])]
     kw = client.messages.last_kwargs
-    assert kw["system"] == [
-        {"type": "text", "text": "SYS", "cache_control": {"type": "ephemeral"}}
-    ]
+    assert kw["system"] == [{"type": "text", "text": "SYS", "cache_control": {"type": "ephemeral"}}]
     assert kw["stream"] is True
     assert kw["thinking"] == {"type": "enabled", "budget_tokens": 2048}
 

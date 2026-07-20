@@ -1,4 +1,5 @@
 """记忆系统集成:provider model 覆盖、build_system_text、TurnController 触发。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -46,9 +47,7 @@ def test_app_config_has_project_root_default_none():
 
 class _FakeOpenAIResponse:
     def __init__(self, content: str) -> None:
-        self.choices = [
-            SimpleNamespace(message=SimpleNamespace(content=content))
-        ]
+        self.choices = [SimpleNamespace(message=SimpleNamespace(content=content))]
 
 
 class _FakeOpenAIClient:
@@ -56,9 +55,7 @@ class _FakeOpenAIClient:
 
     def __init__(self, content: str = "ok") -> None:
         self.calls: list[dict] = []
-        self.chat = SimpleNamespace(
-            completions=SimpleNamespace(create=self._create)
-        )
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
         self._content = content
 
     async def _create(self, **kwargs):
@@ -191,6 +188,7 @@ async def test_controller_no_memory_does_not_crash():
 async def test_controller_aborts_cancel_extract_task():
     mem = RecordingMemory()
     ctrl = _make_controller(memory=mem)
+
     # 手动塞一个 pending task 模拟在跑的提取
     async def _hang():
         await asyncio.sleep(100)

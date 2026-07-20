@@ -12,8 +12,10 @@ def _write(p: Path, text: str) -> None:
 def test_file_skill(tmp_path):
     d = tmp_path / "skill"
     d.mkdir()
-    _write(d / "commit.md",
-           "---\nname: commit\ndescription: make commit\nmode: inline\n---\n# steps\n$ARGUMENTS")
+    _write(
+        d / "commit.md",
+        "---\nname: commit\ndescription: make commit\nmode: inline\n---\n# steps\n$ARGUMENTS",
+    )
     defs = load_md_skills(d, AgentSource.PROJECT)
     assert len(defs) == 1
     s = defs[0]
@@ -27,8 +29,10 @@ def test_file_skill(tmp_path):
 
 def test_dir_skill_reads_skill_md(tmp_path):
     d = tmp_path / "skill"
-    _write(d / "brainstorming" / "SKILL.md",
-           "---\nname: brainstorming\ndescription: brainstorm\n---\nbody")
+    _write(
+        d / "brainstorming" / "SKILL.md",
+        "---\nname: brainstorming\ndescription: brainstorm\n---\nbody",
+    )
     _write(d / "brainstorming" / "extra.md", "ignored")  # 非 SKILL.md 不加载
     defs = load_md_skills(d, AgentSource.PROJECT)
     assert [x.name for x in defs] == ["brainstorming"]

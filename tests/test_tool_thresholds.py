@@ -5,6 +5,7 @@
 真实工具(bash/grep/edit/glob/write)的具体数值零覆盖——改坏任一值都不会有测试失败。
 本文件锁定各工具的阈值,与 commit message 的「per-tool 阈值」卖点对齐。
 """
+
 import math
 
 from birdcode.tools.bash_tool import BashTool

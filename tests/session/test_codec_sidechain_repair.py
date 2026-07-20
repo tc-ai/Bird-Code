@@ -9,6 +9,7 @@
   assistant 收尾、tool_use 全配对。
 - _read_jsonl_rows:跳空行/坏 JSON/非 dict/半截行,文件不存在返回 []。
 """
+
 from __future__ import annotations
 
 import json
@@ -156,8 +157,12 @@ def test_load_sidechain_turns_repairs_with_conservative_message(tmp_path: Path):
                         "message": {
                             "role": "assistant",
                             "content": [
-                                {"type": "tool_use", "id": "toolu_1", "name": "bash",
-                                 "input": {"cmd": "git commit"}}
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "bash",
+                                    "input": {"cmd": "git commit"},
+                                }
                             ],
                         },
                     }

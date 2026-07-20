@@ -146,7 +146,9 @@ async def test_cleanup_keeps_branch(tmp_path: Path) -> None:
     assert not wt.exists()  # F1:目录删了(cwd 已还原离 wt)
     out2 = subprocess.run(
         ["git", "branch", "--list", "worktree-br-keep"],
-        cwd=main, capture_output=True, text=True,
+        cwd=main,
+        capture_output=True,
+        text=True,
     )
     assert "worktree-br-keep" in out2.stdout  # F2 proper:分支保留(不删,commit 不丢)
 
@@ -178,7 +180,9 @@ async def test_create_worktree_reuse_preserves_commit(tmp_path: Path) -> None:
     # 分支仍带 commit
     out = subprocess.run(
         ["git", "log", "--oneline", "worktree-reuse"],
-        cwd=main, capture_output=True, text=True,
+        cwd=main,
+        capture_output=True,
+        text=True,
     )
     assert "work" in out.stdout
     # 再建同名 → checkout 复用,commit 内容回来
@@ -312,13 +316,15 @@ def test_session_store_derives_worktree_name(tmp_path: Path) -> None:
     (wt / ".git").write_text(f"gitdir: {main}/.git/worktrees/foo", encoding="utf-8")
     s_wt = SessionStore(
         SessionContext(session_id="s", cwd=str(wt), version="0.1.0", git_branch="worktree-foo"),
-        tmp_path, root=tmp_path,
+        tmp_path,
+        root=tmp_path,
     )
     assert s_wt.worktree_name == "foo"
     assert "worktree" in s_wt.jsonl_path.parts and "foo" in s_wt.jsonl_path.parts
     s_main = SessionStore(
         SessionContext(session_id="s", cwd=str(main), version="0.1.0", git_branch="main"),
-        tmp_path, root=tmp_path,
+        tmp_path,
+        root=tmp_path,
     )
     assert s_main.worktree_name is None
     assert "worktree" not in s_main.jsonl_path.parts

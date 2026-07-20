@@ -36,8 +36,14 @@ class FakeForkTool:
 
 @pytest.mark.asyncio
 async def test_inline_skill_handler_sends_rendered_body():
-    defn = AgentDefinition(name="commit", description="d", system_prompt="",
-                           mode="inline", is_transparent=True, body="do $ARGUMENTS")
+    defn = AgentDefinition(
+        name="commit",
+        description="d",
+        system_prompt="",
+        mode="inline",
+        is_transparent=True,
+        body="do $ARGUMENTS",
+    )
     caps = AgentRegistry()
     caps.register(defn)
     cr = CommandRegistry()
@@ -50,8 +56,14 @@ async def test_inline_skill_handler_sends_rendered_body():
 
 @pytest.mark.asyncio
 async def test_fork_skill_handler_invokes_async_and_shows_ack():
-    defn = AgentDefinition(name="big", description="d", system_prompt="",
-                           mode="fork", is_transparent=True, body="refactor $ARGUMENTS")
+    defn = AgentDefinition(
+        name="big",
+        description="d",
+        system_prompt="",
+        mode="fork",
+        is_transparent=True,
+        body="refactor $ARGUMENTS",
+    )
     caps = AgentRegistry()
     caps.register(defn)
     fake_tool = FakeForkTool()
@@ -65,8 +77,9 @@ async def test_fork_skill_handler_invokes_async_and_shows_ack():
 
 
 def test_register_only_transparent():
-    agent_defn = AgentDefinition(name="hidden", description="d", system_prompt="ap",
-                                 is_transparent=False)
+    agent_defn = AgentDefinition(
+        name="hidden", description="d", system_prompt="ap", is_transparent=False
+    )
     caps = AgentRegistry()
     caps.register(agent_defn)
     cr = CommandRegistry()
@@ -75,8 +88,9 @@ def test_register_only_transparent():
 
 
 def test_command_type_is_prompt():
-    defn = AgentDefinition(name="s", description="d", system_prompt="",
-                           mode="inline", is_transparent=True, body="b")
+    defn = AgentDefinition(
+        name="s", description="d", system_prompt="", mode="inline", is_transparent=True, body="b"
+    )
     caps = AgentRegistry()
     caps.register(defn)
     cr = CommandRegistry()
@@ -85,8 +99,14 @@ def test_command_type_is_prompt():
 
 
 def test_skill_command_name_conflict_raises():
-    defn = AgentDefinition(name="review", description="d", system_prompt="",
-                           mode="inline", is_transparent=True, body="b")
+    defn = AgentDefinition(
+        name="review",
+        description="d",
+        system_prompt="",
+        mode="inline",
+        is_transparent=True,
+        body="b",
+    )
     caps = AgentRegistry()
     caps.register(defn)
     cr = CommandRegistry()
@@ -94,7 +114,11 @@ def test_skill_command_name_conflict_raises():
     from birdcode.ui.commands.command import Command
 
     async def _stub(ctx, args): ...
-    cr.register(Command(name="/review", description="x", usage="/review",
-                        type=CommandType.PROMPT, handler=_stub))
+
+    cr.register(
+        Command(
+            name="/review", description="x", usage="/review", type=CommandType.PROMPT, handler=_stub
+        )
+    )
     with pytest.raises(CommandConflictError):
         register_skill_commands(cr, caps, {})

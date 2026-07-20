@@ -34,9 +34,7 @@ class _EditInput(BaseModel):
     file_path: str = Field(..., description="要编辑的文件路径(必填)。")
     old_string: str = Field(..., min_length=1, description="须在文件中唯一匹配的原文(非空)")
     new_string: str = Field(..., description="替换后的新文本(必填)。")
-    replace_all: bool = Field(
-        default=False, description="True 全替换;默认仅替换首个唯一匹配。"
-    )
+    replace_all: bool = Field(default=False, description="True 全替换;默认仅替换首个唯一匹配。")
 
 
 class EditTool(Tool):

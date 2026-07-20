@@ -85,19 +85,32 @@ async def test_load_and_repair_persists_synthetics_then_idempotent(tmp_path):
     p.parent.mkdir(parents=True, exist_ok=True)
     # 写带 uuid 的真实侧链(user + assistant 含 unpaired tool_use)。
     p.write_text(
-        "\n".join([
-            json.dumps({
-                "type": "user", "uuid": "u1", "parentUuid": None,
-                "message": {"role": "user", "content": [{"type": "text", "text": "q"}]},
-            }),
-            json.dumps({
-                "type": "assistant", "uuid": "u2", "parentUuid": "u1",
-                "message": {
-                    "role": "assistant",
-                    "content": [{"type": "tool_use", "id": "tu1", "name": "bash", "input": {}}],
-                },
-            }),
-        ]) + "\n",
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "user",
+                        "uuid": "u1",
+                        "parentUuid": None,
+                        "message": {"role": "user", "content": [{"type": "text", "text": "q"}]},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "uuid": "u2",
+                        "parentUuid": "u1",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "tool_use", "id": "tu1", "name": "bash", "input": {}}
+                            ],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
 

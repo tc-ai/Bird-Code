@@ -1,5 +1,6 @@
 # src/birdcode/ui/widgets/subagent_card.py
 """同步子 agent 进度卡(非流式;仅 name+时长+tokens)。"""
+
 from __future__ import annotations
 
 from textual.widgets import Static

@@ -5,8 +5,11 @@ from birdcode.config.schema import AppConfig, ProviderProfile
 
 def _app(project_instructions="PROJECT-RULES", system_prompt="") -> AppConfig:
     return AppConfig(
-        providers={"p": ProviderProfile(name="p", protocol="anthropic", model="m",
-                                        base_url="http://x", api_key="k")},
+        providers={
+            "p": ProviderProfile(
+                name="p", protocol="anthropic", model="m", base_url="http://x", api_key="k"
+            )
+        },
         default="p",
         system_prompt=system_prompt,
         project_instructions=project_instructions,
@@ -14,16 +17,21 @@ def _app(project_instructions="PROJECT-RULES", system_prompt="") -> AppConfig:
 
 
 def test_no_override_keeps_project_instructions():
-    p = _BaseLLMProvider(ProviderProfile(name="p", protocol="anthropic", model="m",
-                                         base_url="http://x", api_key="k"), _app())
+    p = _BaseLLMProvider(
+        ProviderProfile(
+            name="p", protocol="anthropic", model="m", base_url="http://x", api_key="k"
+        ),
+        _app(),
+    )
     text = p._system_text()
     assert "PROJECT-RULES" in text
 
 
 def test_override_prepends_persona_and_keeps_project():
     p = _BaseLLMProvider(
-        ProviderProfile(name="p", protocol="anthropic", model="m",
-                        base_url="http://x", api_key="k"),
+        ProviderProfile(
+            name="p", protocol="anthropic", model="m", base_url="http://x", api_key="k"
+        ),
         _app(),
         system_override="PERSONA",
     )
@@ -34,7 +42,8 @@ def test_override_prepends_persona_and_keeps_project():
 
 
 def test_profile_property_exposed():
-    prof = ProviderProfile(name="p", protocol="anthropic", model="m",
-                           base_url="http://x", api_key="k")
+    prof = ProviderProfile(
+        name="p", protocol="anthropic", model="m", base_url="http://x", api_key="k"
+    )
     p = _BaseLLMProvider(prof, _app())
     assert p.profile is prof

@@ -8,6 +8,7 @@ mock summary provider(complete 返回 <summary>),验证「写边界行 → resum
 注意:计划原文 compact_summary_reserve=1000 / compact_tail_budget=500 违反 schema
 ge=1024 约束,已提到下限 1024(不影响测试意图——仍远小于 turn 体量,触发压缩)。
 """
+
 import json
 from pathlib import Path
 
@@ -28,7 +29,11 @@ class _SummaryProv:
         return "<analysis>x</analysis><summary>压缩摘要:用户在做 X</summary>"
 
     async def summarize_with_prefix(
-        self, *, prefix: list, instruction: str, max_tokens: int  # noqa: ANN001
+        self,
+        *,
+        prefix: list,
+        instruction: str,
+        max_tokens: int,  # noqa: ANN001
     ) -> str:
         return "<analysis>x</analysis><summary>压缩摘要:用户在做 X</summary>"
 
@@ -92,9 +97,7 @@ async def test_e2e_compact_then_resume_truncated(tmp_path):
     s2 = SessionStore(_ctx(), tmp_path, root=tmp_path)
     loaded = await s2.load_mainline()
     s2.close()
-    texts = [
-        b.text for t in loaded for m in t.messages for b in m.content if hasattr(b, "text")
-    ]
+    texts = [b.text for t in loaded for m in t.messages for b in m.content if hasattr(b, "text")]
     assert any("压缩摘要" in t for t in texts)  # 摘要文本在
     assert not any("a" * 100 in t for t in texts)  # 旧 bulk(a,被摘要替代)不在
     assert any("c" * 100 in t for t in texts)  # 尾段(最后 1 turn = c)原样保留、resume 装回

@@ -6,6 +6,7 @@
 不挂主会话)。不更新主 <sid>.meta sidecar、不做 resume/compaction(MVP 子 agent
 不独立 resume)。IO 失败只 log,不杀主循环(与 SessionStore 一致)。
 """
+
 from __future__ import annotations
 
 import json
@@ -66,12 +67,21 @@ class SubagentStore:
         timestamp = utc_iso()
         if is_assistant:
             line = codec.encode_assistant(
-                msg, uuid=new_uuid, parent_uuid=parent_uuid, ctx=self._ctx,
-                timestamp=timestamp, usage=usage, stop_reason=stop_reason,
+                msg,
+                uuid=new_uuid,
+                parent_uuid=parent_uuid,
+                ctx=self._ctx,
+                timestamp=timestamp,
+                usage=usage,
+                stop_reason=stop_reason,
             )
         else:
             line = codec.encode_user(
-                msg, uuid=new_uuid, parent_uuid=parent_uuid, ctx=self._ctx, timestamp=timestamp,
+                msg,
+                uuid=new_uuid,
+                parent_uuid=parent_uuid,
+                ctx=self._ctx,
+                timestamp=timestamp,
             )
         # 强制侧链标记(每行)。model_dump 已含 isSidechain=false 默认,这里覆盖为 true + 注 agentId。
         line["isSidechain"] = True

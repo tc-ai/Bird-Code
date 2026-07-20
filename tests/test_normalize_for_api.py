@@ -5,6 +5,7 @@
 测试层——原测试止于 decoded turns,没人驱动 provider/flattening 层验证实际 payload
 的交替约束(MockProvider 不强制交替,故连续 user 400 得以漏网上线)。
 """
+
 from birdcode.agent.base_llm import normalize_messages_for_api
 from birdcode.blocks import TextBlock, ToolResultBlock, ToolUseBlock
 from birdcode.conversation import Message
@@ -109,11 +110,17 @@ def test_repaired_history_flattens_to_alternating():
     lines = [
         codec.encode_user(
             Message(role="user", content=[TextBlock(text="问")]),
-            uuid="u", parent_uuid=None, ctx=ctx, timestamp="t",
+            uuid="u",
+            parent_uuid=None,
+            ctx=ctx,
+            timestamp="t",
         ),
         codec.encode_assistant(
             Message(role="assistant", content=[ToolUseBlock(id="c", name="echo", input={})]),
-            uuid="a", parent_uuid="u", ctx=ctx, timestamp="t",
+            uuid="a",
+            parent_uuid="u",
+            ctx=ctx,
+            timestamp="t",
         ),
     ]
     turns = codec.decode_lines_to_turns(lines)  # repair 补 tool_result + 合成 assistant

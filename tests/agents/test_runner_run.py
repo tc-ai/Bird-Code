@@ -91,8 +91,11 @@ class _ErrorThenRecoverProvider:
 
 def _cfg():
     return AppConfig(
-        providers={"p": ProviderProfile(name="p", protocol="anthropic", model="m",
-                                        base_url="http://x", api_key="k")},
+        providers={
+            "p": ProviderProfile(
+                name="p", protocol="anthropic", model="m", base_url="http://x", api_key="k"
+            )
+        },
         default="p",
     )
 
@@ -128,11 +131,21 @@ def _patch_build_provider(monkeypatch):
 async def test_run_completes_and_writes_sidechain(tmp_path):
     parent_provider = _FakeProvider(profile=_cfg().providers["p"])
     r = SubagentRunner(
-        defn=_defn(), prompt="做某事", description="d", tool_use_id="call_1",
-        model_override="", spawn_depth=1, is_async=False,
-        parent_provider=parent_provider, parent_registry=None,  # None → 空子 registry
-        parent_gate=None, cfg=_cfg(), app=None, ctx=_ctx(),
-        project_root=tmp_path, root=tmp_path,
+        defn=_defn(),
+        prompt="做某事",
+        description="d",
+        tool_use_id="call_1",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
+        parent_provider=parent_provider,
+        parent_registry=None,  # None → 空子 registry
+        parent_gate=None,
+        cfg=_cfg(),
+        app=None,
+        ctx=_ctx(),
+        project_root=tmp_path,
+        root=tmp_path,
     )
     report = await r.run()
     assert report.status == "completed"
@@ -153,10 +166,21 @@ async def test_run_checklist_marks_not_completed(tmp_path, _patch_build_provider
     _patch_build_provider["text"] = "## 待办清单\n- 主 agent 接手 X"
     parent_provider = _FakeProvider(profile=_cfg().providers["p"])
     r = SubagentRunner(
-        defn=_defn(), prompt="p", description="d", tool_use_id="call_2",
-        model_override="", spawn_depth=1, is_async=False,
-        parent_provider=parent_provider, parent_registry=None, parent_gate=None,
-        cfg=_cfg(), app=None, ctx=_ctx(), project_root=tmp_path, root=tmp_path,
+        defn=_defn(),
+        prompt="p",
+        description="d",
+        tool_use_id="call_2",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
+        parent_provider=parent_provider,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=_cfg(),
+        app=None,
+        ctx=_ctx(),
+        project_root=tmp_path,
+        root=tmp_path,
     )
     report = await r.run()
     assert report.status == "completed"  # 跑到底(生命周期)
@@ -174,10 +198,21 @@ async def test_run_guardrail_failure_reports_error_with_count(tmp_path, _patch_b
     _patch_build_provider["use_tool"] = True
     parent_provider = _FakeProvider(profile=_cfg().providers["p"])
     r = SubagentRunner(
-        defn=_defn(), prompt="p", description="d", tool_use_id="call_3",
-        model_override="", spawn_depth=1, is_async=False,
-        parent_provider=parent_provider, parent_registry=None, parent_gate=None,
-        cfg=_cfg(), app=None, ctx=_ctx(), project_root=tmp_path, root=tmp_path,
+        defn=_defn(),
+        prompt="p",
+        description="d",
+        tool_use_id="call_3",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
+        parent_provider=parent_provider,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=_cfg(),
+        app=None,
+        ctx=_ctx(),
+        project_root=tmp_path,
+        root=tmp_path,
     )
     report = await r.run()
     assert report.status == "error"  # 熔断 → error(非 completed)
@@ -191,10 +226,21 @@ async def test_run_counts_tool_use_on_clean_completion(tmp_path, _patch_build_pr
     _patch_build_provider["one_tool"] = True
     parent_provider = _FakeProvider(profile=_cfg().providers["p"])
     r = SubagentRunner(
-        defn=_defn(), prompt="p", description="d", tool_use_id="call_3b",
-        model_override="", spawn_depth=1, is_async=False,
-        parent_provider=parent_provider, parent_registry=None, parent_gate=None,
-        cfg=_cfg(), app=None, ctx=_ctx(), project_root=tmp_path, root=tmp_path,
+        defn=_defn(),
+        prompt="p",
+        description="d",
+        tool_use_id="call_3b",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
+        parent_provider=parent_provider,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=_cfg(),
+        app=None,
+        ctx=_ctx(),
+        project_root=tmp_path,
+        root=tmp_path,
     )
     report = await r.run()
     assert report.status == "completed"
@@ -211,10 +257,21 @@ async def test_run_recovers_from_midstream_error(tmp_path, _patch_build_provider
     _patch_build_provider["recover"] = True
     parent_provider = _FakeProvider(profile=_cfg().providers["p"])
     r = SubagentRunner(
-        defn=_defn(), prompt="p", description="d", tool_use_id="call_3c",
-        model_override="", spawn_depth=1, is_async=False,
-        parent_provider=parent_provider, parent_registry=None, parent_gate=None,
-        cfg=_cfg(), app=None, ctx=_ctx(), project_root=tmp_path, root=tmp_path,
+        defn=_defn(),
+        prompt="p",
+        description="d",
+        tool_use_id="call_3c",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
+        parent_provider=parent_provider,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=_cfg(),
+        app=None,
+        ctx=_ctx(),
+        project_root=tmp_path,
+        root=tmp_path,
     )
     report = await r.run()
     assert report.status == "completed"  # 恢复完成(非 error)
@@ -245,11 +302,21 @@ async def test_child_provider_gets_mcp_instructions(tmp_path, _patch_build_provi
                 return {"srv": "hello"}
 
         r = SubagentRunner(
-            defn=_defn(), prompt="p", description="d", tool_use_id="call_m",
-            model_override="", spawn_depth=1, is_async=False,
-            parent_provider=_FakeProvider(profile=_cfg().providers["p"]), parent_registry=None,
-            parent_gate=None, cfg=_cfg(), app=_AppStub(), ctx=_ctx(),
-            project_root=tmp_path, root=tmp_path,
+            defn=_defn(),
+            prompt="p",
+            description="d",
+            tool_use_id="call_m",
+            model_override="",
+            spawn_depth=1,
+            is_async=False,
+            parent_provider=_FakeProvider(profile=_cfg().providers["p"]),
+            parent_registry=None,
+            parent_gate=None,
+            cfg=_cfg(),
+            app=_AppStub(),
+            ctx=_ctx(),
+            project_root=tmp_path,
+            root=tmp_path,
         )
         await r.run()
 
@@ -266,10 +333,21 @@ async def test_run_progress_cb_failure_isolated(tmp_path):
         raise RuntimeError("UI hiccup")
 
     r = SubagentRunner(
-        defn=_defn(), prompt="p", description="d", tool_use_id="call_4",
-        model_override="", spawn_depth=1, is_async=False,
-        parent_provider=parent_provider, parent_registry=None, parent_gate=None,
-        cfg=_cfg(), app=None, ctx=_ctx(), project_root=tmp_path, root=tmp_path,
+        defn=_defn(),
+        prompt="p",
+        description="d",
+        tool_use_id="call_4",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
+        parent_provider=parent_provider,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=_cfg(),
+        app=None,
+        ctx=_ctx(),
+        project_root=tmp_path,
+        root=tmp_path,
         progress_cb=_bad_progress,
     )
     report = await r.run()

@@ -5,7 +5,7 @@ def test_system_compact_boundary_line():
     line = SystemLine.model_validate(
         {
             "uuid": "u1",
-            "parent_uuid": None,             # 边界行:树在此重启
+            "parent_uuid": None,  # 边界行:树在此重启
             "session_id": "s1",
             "timestamp": "2026-07-06T00:00:00.000Z",
             "type": "system",

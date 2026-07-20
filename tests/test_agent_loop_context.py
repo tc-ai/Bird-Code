@@ -7,6 +7,7 @@
 3) 不传 context(旧路径/未启用持久化):行为不变,ContextOverflow 直接抛交上层;
 4) 重试上限:连续 overflow→react→重试不能无限,截了 tail 仍超限时 emit Error + return(防死循环)。
 """
+
 import asyncio
 
 import pytest
@@ -74,7 +75,12 @@ async def _run(turn, ctx, prov):  # type: ignore[no-untyped-def]
         events.append(ev)
 
     await run_agent_loop(
-        provider=prov, turn=turn, history=[], executor=None, emit=emit, context=ctx,
+        provider=prov,
+        turn=turn,
+        history=[],
+        executor=None,
+        emit=emit,
+        context=ctx,
     )
     return events
 
@@ -105,7 +111,12 @@ def test_loop_without_context_unchanged_behavior():
             pass
 
         await run_agent_loop(
-            provider=prov, turn=turn, history=[], executor=None, emit=emit, context=None,
+            provider=prov,
+            turn=turn,
+            history=[],
+            executor=None,
+            emit=emit,
+            context=None,
         )
 
     with pytest.raises(ContextOverflow):
@@ -128,7 +139,12 @@ def test_loop_react_retry_cap_stops_infinite_overflow():
             events.append(ev)
 
         await run_agent_loop(
-            provider=prov, turn=turn, history=[], executor=None, emit=emit, context=ctx,
+            provider=prov,
+            turn=turn,
+            history=[],
+            executor=None,
+            emit=emit,
+            context=ctx,
         )
 
     asyncio.run(go())

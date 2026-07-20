@@ -1,5 +1,6 @@
 # tests/test_permission_prompt.py
 """PermissionPrompt 行内菜单:3 编号项 + 类别标签 + 选择回调(取代旧 ModalScreen 测试)。"""
+
 from birdcode.ui.widgets.permission_prompt import PermissionPrompt
 
 

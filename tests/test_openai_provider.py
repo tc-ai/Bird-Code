@@ -266,11 +266,7 @@ async def test_finish_reason_mapped_to_canonical_stop_reason(finish_reason, expe
     交叉校验误判"自然完成"、注入截断文本。修复后显式映射;仅 stop/未知 → end_turn。
     """
     finish_chunk = SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                delta=SimpleNamespace(content=None), finish_reason=finish_reason
-            )
-        ],
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=None), finish_reason=finish_reason)],
         usage=None,
     )
     chunks = [_chunk(content="hi"), finish_chunk]
@@ -346,9 +342,7 @@ async def test_usage_input_not_double_counted_under_openai_semantics():
 
 
 def _nonstream_resp(text: str):
-    return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=text))]
-    )
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
 
 
 @pytest.mark.asyncio

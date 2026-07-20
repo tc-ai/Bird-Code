@@ -11,6 +11,7 @@ frontmatter(YAML):
 
 MEMORY.md 是从 list_memories 扫描重生成的纯指针索引(自动维护,非手写)。
 """
+
 from __future__ import annotations
 
 import os
@@ -54,9 +55,7 @@ def slugify(name: str) -> str:
     return s or "untitled"
 
 
-def serialize_memory(
-    *, name: str, description: str, type_: str, body: str
-) -> str:
+def serialize_memory(*, name: str, description: str, type_: str, body: str) -> str:
     """序列化 frontmatter + body 为完整 .md 文本。"""
     fm = {"name": name, "description": description, "type": type_}
     head = yaml.safe_dump(fm, allow_unicode=True, sort_keys=False).strip()
@@ -169,9 +168,7 @@ def list_memories(dir_: Path) -> list[MemoryMeta]:
         if parsed is None:
             continue
         fm, _body = parsed
-        out.append(
-            MemoryMeta(name=fm.name, description=fm.description, type=fm.type, path=p)
-        )
+        out.append(MemoryMeta(name=fm.name, description=fm.description, type=fm.type, path=p))
     out.sort(key=lambda m: m.name)
     return out
 

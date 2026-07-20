@@ -10,11 +10,13 @@ from birdcode.tools.registry import ToolRegistry
 def _parent_registry_with_agent():
     r = ToolRegistry()
     r.register(EchoTool())
+
     # 模拟 agent tool:is_agent_tool=True 标记(build_child_registry 据此排除,非按名)。
     # 名字任意——证明排除靠标记不靠名字(自定义 agent 名也排除)。
     class _AgentShim(EchoTool):
         name = "general-purpose"
         is_agent_tool = True
+
     r.register(_AgentShim())
     return r
 
@@ -103,10 +105,12 @@ def test_child_registry_forks_bash_isolating_cwd():
 def test_resolve_profile_override_wins():
     cfg = AppConfig(
         providers={
-            "default": ProviderProfile(name="default", protocol="anthropic", model="big",
-                                       base_url="http://x", api_key="k"),
-            "haiku": ProviderProfile(name="haiku", protocol="anthropic", model="small",
-                                     base_url="http://x", api_key="k"),
+            "default": ProviderProfile(
+                name="default", protocol="anthropic", model="big", base_url="http://x", api_key="k"
+            ),
+            "haiku": ProviderProfile(
+                name="haiku", protocol="anthropic", model="small", base_url="http://x", api_key="k"
+            ),
         },
         default="default",
     )
@@ -119,8 +123,11 @@ def test_resolve_profile_override_wins():
 
 def test_resolve_profile_inherit_when_empty():
     cfg = AppConfig(
-        providers={"default": ProviderProfile(name="default", protocol="anthropic", model="big",
-                                              base_url="http://x", api_key="k")},
+        providers={
+            "default": ProviderProfile(
+                name="default", protocol="anthropic", model="big", base_url="http://x", api_key="k"
+            )
+        },
         default="default",
     )
 
@@ -132,8 +139,11 @@ def test_resolve_profile_inherit_when_empty():
 
 def test_resolve_profile_unknown_raises():
     cfg = AppConfig(
-        providers={"default": ProviderProfile(name="default", protocol="anthropic", model="big",
-                                              base_url="http://x", api_key="k")},
+        providers={
+            "default": ProviderProfile(
+                name="default", protocol="anthropic", model="big", base_url="http://x", api_key="k"
+            )
+        },
         default="default",
     )
 

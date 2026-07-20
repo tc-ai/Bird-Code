@@ -1,4 +1,5 @@
 """记忆目录解析(纯函数)测试。"""
+
 from __future__ import annotations
 
 from pathlib import Path

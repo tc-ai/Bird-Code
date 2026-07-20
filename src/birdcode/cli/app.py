@@ -32,8 +32,9 @@ if TYPE_CHECKING:
 
 log = get_logger("birdcode.cli")
 
-app = typer.Typer(add_completion=False, invoke_without_command=True,
-                  help="BirdCode — terminal AI coding agent.")
+app = typer.Typer(
+    add_completion=False, invoke_without_command=True, help="BirdCode — terminal AI coding agent."
+)
 session_app = typer.Typer(help="会话工具(查看 / 可视化历史会话)。")
 app.add_typer(session_app, name="session")
 
@@ -43,9 +44,7 @@ class ProfileError(Exception):
 
 
 def _load(path: str | None, *, project_root: Path | None = None) -> AppConfig | None:
-    return config_loader.load_config(
-        Path(path) if path else None, project_root=project_root
-    )
+    return config_loader.load_config(Path(path) if path else None, project_root=project_root)
 
 
 def _resolve_profile(cfg: AppConfig | None, name: str | None) -> ProviderProfile | None:
@@ -104,14 +103,10 @@ def _resolve_session_id(
     if resume is not None:
         # 严格白名单格式校验,先于文件存在性。避免 ``../`` 等逃逸 encoded-cwd 目录。
         if not re.fullmatch(r"[A-Za-z0-9-]{1,128}", resume):
-            raise ProfileError(
-                f"--resume: 非法 sessionId {resume!r}(仅允许字母数字与连字符)。"
-            )
+            raise ProfileError(f"--resume: 非法 sessionId {resume!r}(仅允许字母数字与连字符)。")
         jf = session_paths.session_jsonl(root, resume, project_root, worktree_name=worktree_name)
         if not jf.exists():
-            raise ProfileError(
-                f"--resume: 无此会话 {resume!r}(用 /sessions 查看可用会话)。"
-            )
+            raise ProfileError(f"--resume: 无此会话 {resume!r}(用 /sessions 查看可用会话)。")
         return resume, True
     if continue_last:
         summaries = SessionStore.list_sessions(root, project_root, worktree_name=worktree_name)
@@ -310,9 +305,7 @@ def run_tui(
     memory_mgr: MemoryManager | None = None
     if profile is not None:
         extract_model = profile.hak_model or profile.model
-        memory_mgr = MemoryManager(
-            provider, project_root=project_root, extract_model=extract_model
-        )
+        memory_mgr = MemoryManager(provider, project_root=project_root, extract_model=extract_model)
     model_label = profile.name if profile is not None else "mock"
 
     # worktree 存储分段名(per-worktree 隔离)+ in_worktree 一次算,复用于
@@ -430,8 +423,13 @@ def _root(
     if ctx.invoked_subcommand is None:
         try:
             run_tui(
-                profile_name, theme, delay, config,
-                continue_last, resume, worktree_name=worktree,
+                profile_name,
+                theme,
+                delay,
+                config,
+                continue_last,
+                resume,
+                worktree_name=worktree,
             )
         except (KeyboardInterrupt, EOFError):
             pass

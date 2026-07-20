@@ -13,6 +13,7 @@ mock 范式抄 tests/agents/test_manager.py(_FakeStore/_FakeController/替身 Ru
   这里 patch resume.SubagentRunner)。meta 走真实 write_subagent_meta/read_subagent_meta,
   paths 走真实函数 —— 只 mock runner/manager/registry 三件。
 """
+
 from __future__ import annotations
 
 import json
@@ -90,8 +91,12 @@ def _write_meta(tmp_path: Path, *, agent_id: str, is_async: bool) -> None:
     write_subagent_meta(
         meta_path,
         SubagentMeta(
-            agentId=agent_id, agentType="general-purpose", description="旧任务",
-            toolUseId="(async-agent)", isAsync=is_async, status="running",
+            agentId=agent_id,
+            agentType="general-purpose",
+            description="旧任务",
+            toolUseId="(async-agent)",
+            isAsync=is_async,
+            status="running",
         ),
     )
 
@@ -103,26 +108,45 @@ def _write_sidechain_with_output(tmp_path: Path, agent_id: str) -> None:
     不误注入完成、走续跑派发,使本文件到达它要验证的 launch_async / run() 路径。
     """
     p = subagent_jsonl_path(tmp_path, "s1", tmp_path, agent_id)
-    user_line = json.dumps({
-        "type": "user",
-        "message": {"role": "user", "content": [{"type": "text", "text": "原任务"}]},
-    })
-    asst_line = json.dumps({
-        "type": "assistant",
-        "message": {"role": "assistant",
-                    "content": [{"type": "text", "text": "## 待办清单\n- [ ] 进行中"}]},
-    })
+    user_line = json.dumps(
+        {
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": "原任务"}]},
+        }
+    )
+    asst_line = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "## 待办清单\n- [ ] 进行中"}],
+            },
+        }
+    )
     p.write_text("\n".join([user_line, asst_line]) + "\n", encoding="utf-8")
 
 
 def _deps(
-    tmp_path: Path, *, manager: _FakeManager, defn: AgentDefinition | None,
+    tmp_path: Path,
+    *,
+    manager: _FakeManager,
+    defn: AgentDefinition | None,
 ) -> ResumeDeps:
     return ResumeDeps(
-        manager=manager, root=tmp_path, session_id="s1", project_root=tmp_path,
-        worktree_name=None, agent_registry=_FakeRegistry(defn),
-        parent_provider=None, parent_registry=None, parent_gate=None, cfg=None, app=None,
-        ctx=None, spawn_depth=1, progress_cb=None,
+        manager=manager,
+        root=tmp_path,
+        session_id="s1",
+        project_root=tmp_path,
+        worktree_name=None,
+        agent_registry=_FakeRegistry(defn),
+        parent_provider=None,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=None,
+        app=None,
+        ctx=None,
+        spawn_depth=1,
+        progress_cb=None,
     )
 
 
@@ -137,7 +161,8 @@ async def test_resume_async_launches_and_reuses_agent_id(tmp_path: Path, monkeyp
     monkeypatch.setattr(resume_mod, "SubagentRunner", _FakeRunner)
 
     result = await resume_subagent(
-        agent_id="sub-old", direction="继续,改成 X",
+        agent_id="sub-old",
+        direction="继续,改成 X",
         deps=_deps(tmp_path, manager=mgr, defn=_defn()),
     )
 
@@ -163,7 +188,8 @@ async def test_resume_sync_runs_inline_and_returns_report_text(tmp_path: Path, m
     monkeypatch.setattr(resume_mod, "SubagentRunner", _FakeRunner)
 
     result = await resume_subagent(
-        agent_id="sub-sync", direction="接着做",
+        agent_id="sub-sync",
+        direction="接着做",
         deps=_deps(tmp_path, manager=mgr, defn=_defn()),
     )
 
@@ -182,7 +208,8 @@ async def test_resume_idempotent_when_live_has_agent(tmp_path: Path, monkeypatch
     monkeypatch.setattr(resume_mod, "SubagentRunner", _FakeRunner)
 
     result = await resume_subagent(
-        agent_id="sub-running", direction="继续",
+        agent_id="sub-running",
+        direction="继续",
         deps=_deps(tmp_path, manager=mgr, defn=_defn()),
     )
 
@@ -199,7 +226,8 @@ async def test_resume_idempotent_when_live_has_agent(tmp_path: Path, monkeypatch
 async def test_resume_meta_missing_returns_friendly(tmp_path: Path):
     # 不写 meta → read_subagent_meta 返回 None
     result = await resume_subagent(
-        agent_id="sub-gone", direction="继续",
+        agent_id="sub-gone",
+        direction="继续",
         deps=_deps(tmp_path, manager=_FakeManager(), defn=_defn()),
     )
 
@@ -213,7 +241,8 @@ async def test_resume_meta_missing_returns_friendly(tmp_path: Path):
 async def test_resume_agent_type_not_found_returns_friendly(tmp_path: Path):
     _write_meta(tmp_path, agent_id="sub-ghost", is_async=False)
     result = await resume_subagent(
-        agent_id="sub-ghost", direction="继续",
+        agent_id="sub-ghost",
+        direction="继续",
         deps=_deps(tmp_path, manager=_FakeManager(), defn=None),  # registry.resolve → None
     )
 

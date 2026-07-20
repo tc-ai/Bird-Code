@@ -187,6 +187,3 @@ def test_deferred_reminder_empty_when_none():
     reg = ToolRegistry()
     reg.register(_PydanticTool())
     assert reg.deferred_reminder() == ""
-
-
-

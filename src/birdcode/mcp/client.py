@@ -74,9 +74,7 @@ class McpManager:
         for name, cfg in self._servers.items():
             self._spawn_lifecycle(name, cfg)
         # 等「连接阶段」结束(ready 在连接完成/失败/超时 set),带超时,不让慢 server 挂死调用方。
-        await asyncio.gather(
-            *(self._wait_ready(n) for n in self._servers), return_exceptions=True
-        )
+        await asyncio.gather(*(self._wait_ready(n) for n in self._servers), return_exceptions=True)
 
     def _spawn_lifecycle(self, name: str, cfg: McpServerConfig) -> None:
         self._stop[name] = asyncio.Event()
@@ -167,9 +165,7 @@ class McpManager:
         tools_resp = await session.list_tools()
         return init, tools_resp
 
-    async def _heartbeat_loop(
-        self, name: str, session: ClientSession, stop: asyncio.Event
-    ) -> None:
+    async def _heartbeat_loop(self, name: str, session: ClientSession, stop: asyncio.Event) -> None:
         """周期 ping;失败标记死(返回→finally pop session→下次 call 触发重连)。
 
         心跳关(<=0)则直接等 stop。每轮先 `wait_for(stop.wait(), interval)`——stop 到则正常
@@ -204,14 +200,10 @@ class McpManager:
                 raise McpServerDownError(server, tool, "重连失败")
         try:
             # B:墙钟兜底,防 session.call_tool 永挂(server 慢/不回响应)卡死 agent_loop。
-            result = await asyncio.wait_for(
-                session.call_tool(tool, args), timeout=_CALL_TIMEOUT
-            )
+            result = await asyncio.wait_for(session.call_tool(tool, args), timeout=_CALL_TIMEOUT)
         except TimeoutError:
             self._sessions.pop(server, None)  # 标记死→下次重连
-            raise McpServerDownError(
-                server, tool, f"调用超时(>{int(_CALL_TIMEOUT)}s)"
-            ) from None
+            raise McpServerDownError(server, tool, f"调用超时(>{int(_CALL_TIMEOUT)}s)") from None
         except Exception as exc:  # noqa: BLE001 - 传输错/中途断连:标记掉线→下次重连
             self._sessions.pop(server, None)
             raise McpServerDownError(server, tool, f"调用中途连接断开: {exc}") from exc
@@ -310,9 +302,7 @@ async def _open_transport(
         async with stdio_client(params, errlog=errlog) as transport:
             yield transport[0], transport[1]  # 兼容 SDK 返回 2 或 3 元组
     elif isinstance(cfg, McpHttpServer):
-        async with httpx.AsyncClient(
-            headers=dict(cfg.headers), timeout=_HTTP_TIMEOUT
-        ) as client:
+        async with httpx.AsyncClient(headers=dict(cfg.headers), timeout=_HTTP_TIMEOUT) as client:
             async with streamable_http_client(cfg.url, http_client=client) as transport:
                 yield transport[0], transport[1]
     else:  # pragma: no cover - 判别联合已保证

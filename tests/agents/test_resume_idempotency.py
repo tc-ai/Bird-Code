@@ -14,6 +14,7 @@ _live 测守卫单点;本文件 _LiveTrackingManager.launch_async 写实 _live(�
 mock 范式抄 tests/agents/test_resume_subagent.py(_FakeRegistry/_FakeRunner + 真实 meta/
 paths,只 monkeypatch resume.SubagentRunner),meta 走真实 write/read_subagent_meta。
 """
+
 from __future__ import annotations
 
 import json
@@ -114,8 +115,12 @@ def _write_meta(tmp_path: Path, *, agent_id: str, status: str = "running") -> No
     write_subagent_meta(
         meta_path,
         SubagentMeta(
-            agentId=agent_id, agentType="general-purpose", description="旧任务",
-            toolUseId="(async-agent)", isAsync=True, status=status,
+            agentId=agent_id,
+            agentType="general-purpose",
+            description="旧任务",
+            toolUseId="(async-agent)",
+            isAsync=True,
+            status=status,
         ),
     )
 
@@ -129,35 +134,61 @@ def _write_sidechain(tmp_path: Path, agent_id: str, *, extra_turn: bool = False)
     """
     p = subagent_jsonl_path(tmp_path, "s1", tmp_path, agent_id)
     lines = [
-        json.dumps({
-            "type": "user",
-            "message": {"role": "user", "content": [{"type": "text", "text": "原任务"}]},
-        }),
-        json.dumps({
-            "type": "assistant",
-            "message": {"role": "assistant",
-                        "content": [{"type": "text", "text": "## 待办清单\n- [ ] 进行中"}]},
-        }),
+        json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": "原任务"}]},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "## 待办清单\n- [ ] 进行中"}],
+                },
+            }
+        ),
     ]
     if extra_turn:
-        lines.append(json.dumps({
-            "type": "user",
-            "message": {"role": "user", "content": [{"type": "text", "text": "继续做"}]},
-        }))
-        lines.append(json.dumps({
-            "type": "assistant",
-            "message": {"role": "assistant",
-                        "content": [{"type": "text", "text": "## 待办清单\n- [ ] 仍在进行"}]},
-        }))
+        lines.append(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": [{"type": "text", "text": "继续做"}]},
+                }
+            )
+        )
+        lines.append(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "## 待办清单\n- [ ] 仍在进行"}],
+                    },
+                }
+            )
+        )
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _deps(tmp_path: Path, *, manager: _LiveTrackingManager) -> ResumeDeps:
     return ResumeDeps(
-        manager=manager, root=tmp_path, session_id="s1", project_root=tmp_path,
-        worktree_name=None, agent_registry=_FakeRegistry(_defn()),
-        parent_provider=None, parent_registry=None, parent_gate=None, cfg=None, app=None,
-        ctx=None, spawn_depth=1, progress_cb=None,
+        manager=manager,
+        root=tmp_path,
+        session_id="s1",
+        project_root=tmp_path,
+        worktree_name=None,
+        agent_registry=_FakeRegistry(_defn()),
+        parent_provider=None,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=None,
+        app=None,
+        ctx=None,
+        spawn_depth=1,
+        progress_cb=None,
     )
 
 
@@ -165,7 +196,8 @@ def _deps(tmp_path: Path, *, manager: _LiveTrackingManager) -> ResumeDeps:
 
 
 async def test_second_resume_while_live_returns_in_progress(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ):
     _FakeRunner.constructed.clear()
     _write_meta(tmp_path, agent_id="sub-live")
@@ -174,11 +206,15 @@ async def test_second_resume_while_live_returns_in_progress(
     monkeypatch.setattr(resume_mod, "SubagentRunner", _FakeRunner)
 
     first = await resume_subagent(
-        agent_id="sub-live", direction="继续", deps=_deps(tmp_path, manager=mgr),
+        agent_id="sub-live",
+        direction="继续",
+        deps=_deps(tmp_path, manager=mgr),
     )
     # 第一次 launch 后 _live 自然含 sub-live(镜像真实 manager)→ 第二次命中 has_live 守卫
     second = await resume_subagent(
-        agent_id="sub-live", direction="再继续", deps=_deps(tmp_path, manager=mgr),
+        agent_id="sub-live",
+        direction="再继续",
+        deps=_deps(tmp_path, manager=mgr),
     )
 
     assert first.outcome == "async_launched"
@@ -194,7 +230,8 @@ async def test_second_resume_while_live_returns_in_progress(
 
 
 async def test_recursive_interruption_self_similar(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ):
     _FakeRunner.constructed.clear()
     _write_meta(tmp_path, agent_id="sub-recur")
@@ -204,7 +241,9 @@ async def test_recursive_interruption_self_similar(
 
     # 第一次 resume(async):launch → _live 加入 sub-recur
     first = await resume_subagent(
-        agent_id="sub-recur", direction="继续", deps=_deps(tmp_path, manager=mgr),
+        agent_id="sub-recur",
+        direction="继续",
+        deps=_deps(tmp_path, manager=mgr),
     )
     assert first.outcome == "async_launched"
     assert mgr.launch_count == 1
@@ -224,7 +263,9 @@ async def test_recursive_interruption_self_similar(
 
     # 再 resume:同机制(_live 已清空 → 重新 launch,launch_count 递增到 2)
     second = await resume_subagent(
-        agent_id="sub-recur", direction="再次继续", deps=_deps(tmp_path, manager=mgr),
+        agent_id="sub-recur",
+        direction="再次继续",
+        deps=_deps(tmp_path, manager=mgr),
     )
 
     second_resume_works = second.outcome == "async_launched" and mgr.launch_count == 2

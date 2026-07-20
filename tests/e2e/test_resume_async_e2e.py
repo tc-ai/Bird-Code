@@ -26,6 +26,7 @@ mock 范式:抄 tests/agents/test_resume_idempotency.py(_FakeRunner + 真实 met
 monkeypatch resume_mod.SubagentRunner)+ tests/agents/test_phase2_e2e.py(真实
 SubagentManager + TurnController + SessionStore + mock 主 provider + _wait_until_* 轮询)。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -70,9 +71,7 @@ class _MainProvider:
     def stream(self, messages, *, history):  # noqa: ARG002
         async def _gen():
             yield TextDelta(text=self._text)
-            yield Done(
-                usage=TokenUsage(input_tokens=5, output_tokens=3), stop_reason="end_turn"
-            )
+            yield Done(usage=TokenUsage(input_tokens=5, output_tokens=3), stop_reason="end_turn")
 
         return _gen()
 
@@ -135,9 +134,7 @@ def _cfg() -> AppConfig:
 
 
 def _make_store(tmp_path: Path, session_id: str) -> SessionStore:
-    ctx = SessionContext(
-        session_id=session_id, cwd=str(tmp_path), version="0.1.0", git_branch=None
-    )
+    ctx = SessionContext(session_id=session_id, cwd=str(tmp_path), version="0.1.0", git_branch=None)
     return SessionStore(ctx, tmp_path, root=tmp_path)
 
 

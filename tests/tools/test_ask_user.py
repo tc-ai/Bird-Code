@@ -1,5 +1,6 @@
 # tests/tools/test_ask_user.py
 """ask_user 工具:execute 委托 app.ask_user、异步 stub 返回拒文案、Input 校验。"""
+
 import pytest
 
 from birdcode.tools.ask_user import AskOption, AskUserAsyncStub, AskUserInput, AskUserTool

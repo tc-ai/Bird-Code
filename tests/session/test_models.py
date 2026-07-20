@@ -33,7 +33,10 @@ def test_user_line_roundtrip_camel_case_alias():
 
 def test_user_line_parent_uuid_optional():
     line = UserLine(
-        uuid="u1", session_id="s1", timestamp="t", message={"role": "user", "content": []},
+        uuid="u1",
+        session_id="s1",
+        timestamp="t",
+        message={"role": "user", "content": []},
     )
     assert line.parent_uuid is None
     assert line.is_sidechain is False
@@ -46,8 +49,10 @@ def test_assistant_line_message_dict():
         session_id="s1",
         timestamp="t",
         message={
-            "role": "assistant", "content": [],
-            "usage": {"input_tokens": 5}, "stop_reason": "end_turn",
+            "role": "assistant",
+            "content": [],
+            "usage": {"input_tokens": 5},
+            "stop_reason": "end_turn",
         },
     )
     assert line.message["usage"]["input_tokens"] == 5
@@ -57,7 +62,10 @@ def test_extra_fields_allowed_for_forward_compat():
     """未来加字段不破坏旧读取(前向兼容)。"""
     line = UserLine.model_validate(
         {
-            "type": "user", "uuid": "u1", "sessionId": "s1", "timestamp": "t",
+            "type": "user",
+            "uuid": "u1",
+            "sessionId": "s1",
+            "timestamp": "t",
             "message": {"role": "user", "content": []},
             "futureField": "unknown",  # 未知字段
         }
@@ -75,7 +83,10 @@ def test_persist_info_and_summary_shapes():
     assert pi.size == 100
     # SessionSummary 带 sidecar 摘要(first_user/turn_count 来自 <sid>.meta,不再扫 jsonl)。
     s = SessionSummary(
-        session_id="sid", mtime=1.0, first_user_summary="hi", turn_count=2,
+        session_id="sid",
+        mtime=1.0,
+        first_user_summary="hi",
+        turn_count=2,
     )
     assert s.first_user_summary == "hi"
     assert s.turn_count == 2
@@ -109,8 +120,11 @@ def test_agent_tool_use_result_async_shape():
     from birdcode.session.models import AgentToolUseResult
 
     r = AgentToolUseResult(
-        agent_id="a1", status="launched", is_async=True,
-        output_file="/tmp/x.txt", can_read_output_file=True,
+        agent_id="a1",
+        status="launched",
+        is_async=True,
+        output_file="/tmp/x.txt",
+        can_read_output_file=True,
     )
     dumped = r.model_dump(by_alias=True, exclude_none=True)
     assert dumped["status"] == "launched"
@@ -124,8 +138,11 @@ def test_queue_operation_line_roundtrip():
     from birdcode.session.models import QueueOperationLine
 
     line = QueueOperationLine(
-        session_id="s1", timestamp="t",
-        operation="enqueue", agent_id="a1", tool_use_id="call_x",
+        session_id="s1",
+        timestamp="t",
+        operation="enqueue",
+        agent_id="a1",
+        tool_use_id="call_x",
         status="completed",
     )
     dumped = line.model_dump(by_alias=True, exclude_none=False)
@@ -141,11 +158,19 @@ def test_subagent_meta_roundtrip():
     from birdcode.session.models import SubagentMeta
 
     m = SubagentMeta(
-        agent_id="a1", agent_type="general-purpose", description="Spec review T7",
-        tool_use_id="call_x", spawn_depth=1, is_async=True, model="sonnet",
-        resolved_model="claude-sonnet-5", status="completed",
-        spawned_at="2026-07-08T00:00:00Z", completed_at="2026-07-08T00:01:00Z",
-        total_duration_ms=1234, total_tokens=567,
+        agent_id="a1",
+        agent_type="general-purpose",
+        description="Spec review T7",
+        tool_use_id="call_x",
+        spawn_depth=1,
+        is_async=True,
+        model="sonnet",
+        resolved_model="claude-sonnet-5",
+        status="completed",
+        spawned_at="2026-07-08T00:00:00Z",
+        completed_at="2026-07-08T00:01:00Z",
+        total_duration_ms=1234,
+        total_tokens=567,
     )
     dumped = m.model_dump(by_alias=True, exclude_none=True)
     assert dumped["agentId"] == "a1"

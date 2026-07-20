@@ -4,6 +4,7 @@
 内存热路径用 dataclass(blocks.py/conversation.py),持久化层用 Pydantic。
 翻译层(codec.py)在两者间转换。jsonl 用 CC 的 camelCase 字段名(by_alias)。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -125,9 +126,9 @@ class SubagentMeta(BaseModel):
     model: str = ""
     resolved_model: str | None = Field(None, alias="resolvedModel")
     # lost = 用户按 2/No 永久丢弃(不可续);discover.RESUMABLE_STATUSES 不含 lost → 天然排除。
-    status: Literal[
-        "launched", "running", "idle", "completed", "error", "cancelled", "lost"
-    ] = "launched"
+    status: Literal["launched", "running", "idle", "completed", "error", "cancelled", "lost"] = (
+        "launched"
+    )
     spawned_at: str = Field("", alias="spawnedAt")
     completed_at: str | None = Field(None, alias="completedAt")
     total_duration_ms: int | None = Field(None, alias="totalDurationMs")

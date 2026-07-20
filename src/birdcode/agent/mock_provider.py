@@ -41,7 +41,11 @@ class MockProvider:
         return f"<analysis>draft</analysis>\n<summary>{user}</summary>"
 
     async def summarize_with_prefix(
-        self, *, prefix: list[Message], instruction: str, max_tokens: int  # noqa: ARG002
+        self,
+        *,
+        prefix: list[Message],
+        instruction: str,
+        max_tokens: int,  # noqa: ARG002
     ) -> str:
         """摘要用(与 complete 对齐):包 <summary>,供 _extract_summary 测试。
 

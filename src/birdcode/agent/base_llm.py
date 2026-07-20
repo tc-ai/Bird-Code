@@ -276,7 +276,8 @@ class _BaseLLMProvider:
             return messages
         memory_idx = self._memory_index()
         reminder = await build_system_reminder(
-            registry=self._registry, memory=memory_idx,
+            registry=self._registry,
+            memory=memory_idx,
             subagent=self._system_override is not None,
         )
         if not reminder:
@@ -284,9 +285,7 @@ class _BaseLLMProvider:
         first = messages[0]
         if first.role != "user":
             return messages
-        new_first = Message(
-            role=first.role, content=[*first.content, TextBlock(text=reminder)]
-        )
+        new_first = Message(role=first.role, content=[*first.content, TextBlock(text=reminder)])
         return [new_first, *messages[1:]]
 
     def _memory_index(self) -> str:

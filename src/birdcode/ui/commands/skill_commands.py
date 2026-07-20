@@ -4,6 +4,7 @@ inline → CommandType.PROMPT,handler 渲染 body 后 send_user_message(注入�
 fork → handler 调 _ForkSkillTool.invoke_async(始终异步,不阻塞 UI),摘要经 wake 回流。
 CommandContext 不暴露 subagent 依赖 → fork handler 关闭 tool 实例(其持全部 deps)。
 """
+
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping

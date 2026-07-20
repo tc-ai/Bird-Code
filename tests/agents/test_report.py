@@ -13,8 +13,12 @@ def _defn():
 
 def _report(is_completed, text):
     return SubagentReport(
-        is_completed=is_completed, text=text, status="completed",
-        duration_ms=1234, tokens=1500, tool_use_count=3,
+        is_completed=is_completed,
+        text=text,
+        status="completed",
+        duration_ms=1234,
+        tokens=1500,
+        tool_use_count=3,
     )
 
 

@@ -297,7 +297,9 @@ async def test_controller_appends_user_and_assistant_to_store(tmp_path):
 
     ctrl = TurnController(
         FakeProvider([TextDelta(text="hi"), Done(usage=TokenUsage())]),
-        on_event=_noop_event, on_status=on_status, store=store,
+        on_event=_noop_event,
+        on_status=on_status,
+        store=store,
     )
     await ctrl.submit("hello")
     store.close()
@@ -334,7 +336,9 @@ async def test_controller_resume_loads_history_and_sets_leaf(tmp_path):
     store2 = SessionStore(ctx, tmp_path, root=tmp_path)
     ctrl = TurnController(
         FakeProvider([TextDelta(text="新答"), Done(usage=TokenUsage())]),
-        on_event=_noop_event, on_status=_noop_status, store=store2,
+        on_event=_noop_event,
+        on_status=_noop_status,
+        store=store2,
     )
     turns = await ctrl.resume()
     assert len(turns) == 1 and len(ctrl.history) == 1
@@ -343,9 +347,7 @@ async def test_controller_resume_loads_history_and_sets_leaf(tmp_path):
     store2.close()
     jf2 = tmp_path / _paths.encode_cwd(tmp_path) / "s1.jsonl"
     rows = [
-        json.loads(line)
-        for line in jf2.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in jf2.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
     # 旧2行 + 新轮(user+assistant)2行 = 4;且第3行 parentUuid == 第2行 uuid
     assert len(rows) == 4
@@ -357,7 +359,8 @@ async def test_controller_without_store_works_as_before():
     """store=None(旧路径/无持久化)→ 行为不变,不 append。"""
     ctrl = TurnController(
         FakeProvider([TextDelta(text="hi"), Done(usage=TokenUsage())]),
-        on_event=_noop_event, on_status=_noop_status,
+        on_event=_noop_event,
+        on_status=_noop_status,
     )
     await ctrl.submit("hello")
     assert len(ctrl.history) == 1

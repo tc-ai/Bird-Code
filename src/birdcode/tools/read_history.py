@@ -248,18 +248,12 @@ def _preserved_turn_count(boundary_row: dict[str, Any]) -> int:
     return n
 
 
-def _pagination_hints(
-    offset: int, got: int, total: int, limit: int
-) -> list[str]:
+def _pagination_hints(offset: int, got: int, total: int, limit: int) -> list[str]:
     """翻页提示:更早(offset+) / 更新(offset-,向压缩点靠拢)。已到端点则省略对应行。"""
     hints: list[str] = []
     if offset + got < total:
-        hints.append(
-            f"[hint] 更早(更旧)的历史: read_history(offset={offset + got}, limit={limit})"
-        )
+        hints.append(f"[hint] 更早(更旧)的历史: read_history(offset={offset + got}, limit={limit})")
     if offset > 0:
         prev = max(0, offset - limit)
-        hints.append(
-            f"[hint] 更新(更接近压缩点)的历史: read_history(offset={prev}, limit={limit})"
-        )
+        hints.append(f"[hint] 更新(更接近压缩点)的历史: read_history(offset={prev}, limit={limit})")
     return hints

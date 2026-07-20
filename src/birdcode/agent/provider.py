@@ -21,8 +21,8 @@ if TYPE_CHECKING:
 class TokenUsage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
-    cache_read_tokens: int = 0       # Anthropic cache_read_input_tokens / OpenAI cached_tokens
-    cache_creation_tokens: int = 0   # 仅 Anthropic;OpenAI 恒 0
+    cache_read_tokens: int = 0  # Anthropic cache_read_input_tokens / OpenAI cached_tokens
+    cache_creation_tokens: int = 0  # 仅 Anthropic;OpenAI 恒 0
     cost_usd: float = 0.0
 
 

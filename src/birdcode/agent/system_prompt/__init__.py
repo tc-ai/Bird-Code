@@ -79,4 +79,4 @@ async def build_system_reminder(
             "严禁编辑/修改非工作目录下的任何文件，可以读取。"
             f"你的工作目录是 {cwd}"
         )
-    return "<system-reminder>\n" f"{body}\n" "</system-reminder>"
+    return f"<system-reminder>\n{body}\n</system-reminder>"

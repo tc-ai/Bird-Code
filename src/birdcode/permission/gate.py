@@ -113,8 +113,10 @@ class UiPermissionGate:
         # local 层 = yaml_paths[0](default_yaml_paths 约定 [local, project, user])。
         # HITL「Always」写这里,且 _reload_local 只重读它(省去全量 _reload 的系统调用)。
         # 兜底锚 project_root(非 Path.cwd()),cwd 漂移(worktree chdir)不影响 local-YAML 定位。
-        self._local_path = self._yaml_paths[0] if self._yaml_paths else (
-            self._project_root / ".birdcode" / "permissions.local.yaml"
+        self._local_path = (
+            self._yaml_paths[0]
+            if self._yaml_paths
+            else (self._project_root / ".birdcode" / "permissions.local.yaml")
         )
         self._extra_roots = [p.resolve() for p in (extra_roots or [])]
         self._session: list[Rule] = []
@@ -132,6 +134,7 @@ class UiPermissionGate:
         等),故对 bash 返回 approve、其余写工具(write/edit/delete)仍 reject——异步子 agent
         不应后台改文件。L1-L4 复用父 get_mode/yaml_paths/extra_roots/project_root/sandbox_root。
         """
+
         async def _allow_bash(tool_name: str, _summary: str, _path: str | None) -> ModalResult:
             return "approve" if tool_name == "bash" else "reject"
 
@@ -154,6 +157,7 @@ class UiPermissionGate:
         bash 同样自动批(L1 黑名单仍拦 rm -rf / 等)。复用父 get_mode/yaml_paths/extra_roots/
         project_root(skill/permission 仍锚主仓)。
         """
+
         async def _approve(_tool_name: str, _summary: str, _path: str | None) -> ModalResult:
             return "approve"
 

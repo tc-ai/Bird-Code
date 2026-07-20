@@ -37,9 +37,7 @@ def test_is_worktree_false_for_submodule(tmp_path: Path) -> None:
     回归:旧版只看 `gitdir:` 开头,子模块也是 gitdir 文件 → 误判 → 错 project_root/sandbox
     + 退出 remove 抛错。
     """
-    (tmp_path / ".git").write_text(
-        "gitdir: /main/.git/modules/sub", encoding="utf-8"
-    )
+    (tmp_path / ".git").write_text("gitdir: /main/.git/modules/sub", encoding="utf-8")
     assert is_worktree(tmp_path) is False
 
 
@@ -55,9 +53,7 @@ def test_resolve_main_repo_from_absolute_gitdir(tmp_path: Path) -> None:
 
 def test_is_worktree_true_for_separate_git_dir(tmp_path: Path) -> None:
     """#7:separate-git-dir 的 worktree(gitdir `.../.real.git/worktrees/<n>`)也判为 worktree。"""
-    (tmp_path / ".git").write_text(
-        "gitdir: /main/.real.git/worktrees/wt-x", encoding="utf-8"
-    )
+    (tmp_path / ".git").write_text("gitdir: /main/.real.git/worktrees/wt-x", encoding="utf-8")
     assert is_worktree(tmp_path) is True
 
 
@@ -67,9 +63,7 @@ def test_resolve_main_repo_separate_git_dir(tmp_path: Path) -> None:
     (main / ".real.git" / "worktrees" / "wt-x").mkdir(parents=True)
     wt = tmp_path / "wt-x"
     wt.mkdir()
-    (wt / ".git").write_text(
-        f"gitdir: {main}/.real.git/worktrees/wt-x", encoding="utf-8"
-    )
+    (wt / ".git").write_text(f"gitdir: {main}/.real.git/worktrees/wt-x", encoding="utf-8")
     assert resolve_main_repo(wt) == main.resolve()
 
 

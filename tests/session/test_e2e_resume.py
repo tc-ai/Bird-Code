@@ -4,6 +4,7 @@
 会话1 跑一轮(MockProvider echo 工具往返)→ 退出 → 会话2 resume → MockProvider
 接着聊(看到旧 history)→ 验证 jsonl 链连续性(parentUuid 不断裂)。
 """
+
 import json
 
 import pytest

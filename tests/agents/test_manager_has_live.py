@@ -3,6 +3,7 @@
 has_live 是 _live dict 的公共只读访问器,替代外部对 manager._live 私有字段的直访
 (如 resume.py 的幂等检查)。仅查在跑异步 task,不 mutate。
 """
+
 from birdcode.agents.manager import SubagentManager
 
 

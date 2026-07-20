@@ -18,10 +18,16 @@ def test_format_tokens():
 
 def test_card_renders_progress():
     card = SubagentCard()
-    card.update_progress(SubagentProgress(
-        agent_id="sub-1", description="探索代码库", elapsed_ms=73000,
-        input_tokens=12300, tool_use_count=4, phase="running",
-    ))
+    card.update_progress(
+        SubagentProgress(
+            agent_id="sub-1",
+            description="探索代码库",
+            elapsed_ms=73000,
+            input_tokens=12300,
+            tool_use_count=4,
+            phase="running",
+        )
+    )
     markup = card.render() if hasattr(card, "render") else str(card._renderable)
     assert "探索代码库" in markup
     assert "12.3k" in markup  # 格式化 tokens(非原始 12300)

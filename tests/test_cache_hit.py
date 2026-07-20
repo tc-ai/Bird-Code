@@ -122,12 +122,17 @@ async def test_messages_cache_breakpoint_at_prior_end():
     app, prof = _app_prof()
     c = _FakeAnthropic(events)
     p = AnthropicProvider(prof, app, client=c)
-    history = [Turn(messages=[
-        Message(role="user", content=[TextBlock(text="past question")]),
-        Message(role="assistant", content=[TextBlock(text="past answer")]),
-    ])]
+    history = [
+        Turn(
+            messages=[
+                Message(role="user", content=[TextBlock(text="past question")]),
+                Message(role="assistant", content=[TextBlock(text="past answer")]),
+            ]
+        )
+    ]
     _ = [
-        e async for e in p.stream(
+        e
+        async for e in p.stream(
             [Message(role="user", content=[TextBlock(text="now")])], history=history
         )
     ]
@@ -159,10 +164,17 @@ async def test_no_messages_breakpoint_when_no_history():
 async def test_summarize_with_prefix_reuses_main_system_tools_none_and_breakpoint():
     """summarize_with_prefix:复用主 system(非摘要模板)+tools(cached)+tool_choice=none;
     prior 末 block 有 cache 断点;末条 user == instruction(落断点之后)。"""
+
     class _Reg:
         def to_anthropic_tools(self, *, cached=False):  # noqa: ANN001, ANN202
-            return [{"type": "custom", "name": "f", "input_schema": {},
-                     "cache_control": {"type": "ephemeral"}}]
+            return [
+                {
+                    "type": "custom",
+                    "name": "f",
+                    "input_schema": {},
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
 
     msg = SimpleNamespace(content=[SimpleNamespace(type="text", text="<summary>S</summary>")])
     app, prof = _app_prof()
@@ -193,8 +205,12 @@ async def test_summarize_with_prefix_mirrors_thinking_and_bumps_max_tokens():
 
     msg = SimpleNamespace(content=[SimpleNamespace(type="text", text="<summary>S</summary>")])
     prof = ProviderProfile(
-        name="c", protocol="anthropic", model="claude-sonnet-4-5",
-        base_url="u", api_key="k", thinking=ThinkingConfig(budget_tokens=8000),
+        name="c",
+        protocol="anthropic",
+        model="claude-sonnet-4-5",
+        base_url="u",
+        api_key="k",
+        thinking=ThinkingConfig(budget_tokens=8000),
     )
     app = AppConfig(providers={"c": prof})
     c = _FakeAnthropic([], nonstream_msg=msg)
@@ -220,13 +236,20 @@ async def test_messages_breakpoint_avoids_merged_current():
     app, prof = _app_prof()
     c = _FakeAnthropic(events)
     p = AnthropicProvider(prof, app, client=c)
-    history = [Turn(messages=[
-        Message(role="user", content=[TextBlock(text="past question")]),
-        Message(role="assistant", content=[ToolUseBlock(id="t1", name="f", input={})]),
-        Message(role="user", content=[ToolResultBlock(tool_use_id="t1", content="result blob")]),
-    ])]
+    history = [
+        Turn(
+            messages=[
+                Message(role="user", content=[TextBlock(text="past question")]),
+                Message(role="assistant", content=[ToolUseBlock(id="t1", name="f", input={})]),
+                Message(
+                    role="user", content=[ToolResultBlock(tool_use_id="t1", content="result blob")]
+                ),
+            ]
+        )
+    ]
     _ = [
-        e async for e in p.stream(
+        e
+        async for e in p.stream(
             [Message(role="user", content=[TextBlock(text="continue")])], history=history
         )
     ]
@@ -246,16 +269,23 @@ async def test_convert_skips_thinking_block_when_profile_thinking_none():
     from birdcode.blocks import ThinkingBlock
 
     app, prof = _app_prof()  # prof.thinking 默认 None
-    c = _FakeAnthropic([
-        _ev(type="message_start", message=_ev(usage=_ev(input_tokens=1))),
-        _ev(type="message_stop"),
-    ])
+    c = _FakeAnthropic(
+        [
+            _ev(type="message_start", message=_ev(usage=_ev(input_tokens=1))),
+            _ev(type="message_stop"),
+        ]
+    )
     p = AnthropicProvider(prof, app, client=c)
     _ = [e async for e in p.stream([Message(role="user", content=[TextBlock("q")])], history=[])]
-    msg_with_thinking = [Message(role="assistant", content=[
-        ThinkingBlock(text="prior reasoning", signature="sig"),
-        TextBlock(text="answer"),
-    ])]
+    msg_with_thinking = [
+        Message(
+            role="assistant",
+            content=[
+                ThinkingBlock(text="prior reasoning", signature="sig"),
+                TextBlock(text="answer"),
+            ],
+        )
+    ]
     out = p._convert(msg_with_thinking)
     types = [b.get("type") for b in out[0]["content"]]
     assert "thinking" not in types  # 跳过 ThinkingBlock

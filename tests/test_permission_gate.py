@@ -476,6 +476,7 @@ async def test_fork_async_allows_read_same_as_parent(gate_factory, tmp_path):
 @pytest.mark.asyncio
 async def test_fork_async_allows_bash(tmp_path):
     """fork_async:bash 放行(异步子 agent 常用只读 bash 探查;L1 仍拦危险,其余 approve)。"""
+
     async def gm() -> str:
         return "default"
 

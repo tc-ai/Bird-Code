@@ -260,7 +260,10 @@ class TurnController:
         return self._executor.revoke_permission(rule_id) if self._executor is not None else False
 
     async def request_permission(
-        self, tool_name: str, summary: str, path: str | None  # noqa: ARG002
+        self,
+        tool_name: str,
+        summary: str,
+        path: str | None,  # noqa: ARG002
     ) -> Literal["approve", "reject", "session"]:
         """executor/gate 经此请求用户确认;await 直到用户响应(Esc=Reject)。
 
