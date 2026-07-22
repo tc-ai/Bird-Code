@@ -30,7 +30,8 @@ def _lookup_price(model: str) -> tuple[float, float] | None:
 def _provider_family(model: str) -> str:
     """按模型名前缀判 provider 族,决定缓存 token 的计费语义与折扣。
 
-    - anthropic(claude*):input_tokens 已排除缓存;read 0.1×、create 1.25×(对 input 价)。
+    - anthropic(claude*):input_tokens 已归一为全量(含缓存);fresh = 全量 − read − create,
+      read 0.1×、create 1.25×(均对 input 价)。
     - openai(gpt*):prompt_tokens 含 cached_tokens,需先扣除;read 0.5×、无 creation 概念。
     - other(deepseek 等):缓存计费规则不一且未核实,走 legacy(忽略缓存),不臆测以免引入新偏差。
     """
@@ -54,8 +55,11 @@ def estimate_cost(model: str, usage: TokenUsage) -> float:
         read_mult = 0.5
         create_mult = 0.0
     elif family == "anthropic":
-        # input_tokens 已排除缓存,直接按新鲜价计;读 0.1×、写 1.25×(补回少计)。
-        fresh_input = usage.input_tokens
+        # input_tokens 已归一为全量(含缓存,见 anthropic_provider message_stop);fresh = 全量 −
+        # read − create,读 0.1×、写 1.25×。不扣则缓存部分被按新鲜价重复计费(多计)。
+        fresh_input = max(
+            0, usage.input_tokens - usage.cache_read_tokens - usage.cache_creation_tokens
+        )
         read_mult = 0.1
         create_mult = 1.25
     else:

@@ -243,3 +243,39 @@ async def test_usage_parses_cache_read_and_creation_tokens():
     u = out[-1].usage
     assert u.cache_read_tokens == 4096
     assert u.cache_creation_tokens == 128
+
+
+@pytest.mark.asyncio
+async def test_usage_full_input_normalizes_uncached_tail():
+    """input_tokens 归一为真实全量(= miss + cache_read + cache_creation)。
+
+    实测(Anthropic 协议端点,含真 Anthropic 与 GLM/deepseek 兼容 shim):usage.input_tokens
+    只报**未缓存尾段**(miss),命中量在 cache_read_input_tokens、写缓存在 cache_creation。
+    BirdCode 到处把 TokenUsage.input_tokens 当「完整请求大小」用(ContextManager.maybe_compact
+    的 last_in 锚点、/context 的 last_measured 脚注),若原样存 miss → 缓存一热 input_tokens 即
+    缩水,/context 读数随之下跌、autocompact 锚点失灵永不触发。须归一,与 OpenAI provider
+    的 deepseek 归一(openai_provider._translate full_input)对齐同一口径。
+
+    数字取自 GLM 实测(scripts/tools_cache_bench remove_last 场景):in=629 read=704 → 全量 1333。
+    """
+    events = [
+        _ev(
+            type="message_start",
+            message=_ev(
+                usage=_ev(
+                    input_tokens=629,
+                    cache_read_input_tokens=704,
+                    cache_creation_input_tokens=0,
+                )
+            ),
+        ),
+        _ev(type="message_delta", usage=_ev(output_tokens=5)),
+        _ev(type="message_stop"),
+    ]
+    app, prof = _app()
+    client = FakeAnthropic(events)
+    p = AnthropicProvider(prof, app, client=client)
+    out = [e async for e in p.stream([Message(role="user", content=[TextBlock("x")])], history=[])]
+    assert out[-1].usage.input_tokens == 1333  # 629 + 704 + 0(真实全量,非裸 miss=629)
+    assert out[-1].usage.cache_read_tokens == 704
+    assert out[-1].usage.cache_creation_tokens == 0

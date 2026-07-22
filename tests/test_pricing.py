@@ -30,7 +30,8 @@ def test_estimate_cost_case_insensitive_prefix():
 
 
 # --- 缓存 token 计费(Anthropic 少计 / OpenAI 多计 的修复)---
-# Anthropic:input_tokens 已排除缓存;cache_read 0.1×、cache_creation 1.25×(均对 input 价)。
+# 两 provider 均已把 input_tokens 归一为「真实全量」(含缓存);故 fresh = input - read - create,
+# 命中/写缓存另按折扣计:Anthropic cache_read 0.1×、cache_creation 1.25×(对 input 价)。
 def test_estimate_cost_anthropic_cache_read_priced():
     # 纯缓存读轮(无新鲜输入):旧实现返回 0(少计)。修复后 1M × 0.1× × 3.0 = 0.3。
     u = TokenUsage(input_tokens=0, output_tokens=0, cache_read_tokens=1_000_000)
@@ -44,9 +45,10 @@ def test_estimate_cost_anthropic_cache_creation_priced():
 
 
 def test_estimate_cost_anthropic_mixed_round():
+    # 全量 input=3M(= fresh 1M + read 1M + create 1M;input_tokens 已归一为全量)。
     # fresh 1M@3.0 + read 1M@0.3 + create 1M@3.75 + out 1M@15.0 = 22.05
     u = TokenUsage(
-        input_tokens=1_000_000,
+        input_tokens=3_000_000,
         output_tokens=1_000_000,
         cache_read_tokens=1_000_000,
         cache_creation_tokens=1_000_000,

@@ -261,8 +261,16 @@ class AnthropicProvider(_BaseLLMProvider):
             if sr:
                 self._stop_reason = str(sr)
         elif t == "message_stop":
+            # input_tokens 归一为真实全量 = miss + cache_read + cache_creation。
+            # Anthropic 协议(真 Anthropic / GLM / deepseek 兼容 shim)的 usage.input_tokens
+            # 只报**未缓存尾段**(miss),命中量在 cache_read、写缓存在 cache_creation。BirdCode
+            # 到处把 TokenUsage.input_tokens 当「完整请求大小」用(ContextManager.maybe_compact
+            # 的 last_in 锚点、/context 的 last_measured 脚注),原样存 miss → 缓存一热即缩水,
+            # /context 读数下跌、autocompact 锚点失灵永不触发。与 openai_provider._translate 的
+            # full_input 同口径;pricing anthropic 分支相应改为 fresh = input - read - create。
+            full_input = self._input_tokens + self._cache_read_tokens + self._cache_creation_tokens
             usage = TokenUsage(
-                input_tokens=self._input_tokens,
+                input_tokens=full_input,
                 output_tokens=self._output_tokens,
                 cache_read_tokens=self._cache_read_tokens,
                 cache_creation_tokens=self._cache_creation_tokens,
