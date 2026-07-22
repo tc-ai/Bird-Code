@@ -15,7 +15,14 @@ from typing import Literal, Protocol, cast
 from birdcode.agent.agent_loop import run_agent_loop
 from birdcode.agent.context import ContextManager
 from birdcode.agent.factory import build_provider
-from birdcode.agent.provider import Done, Error, ProviderEvent, TokenUsage, ToolCallStart
+from birdcode.agent.provider import (
+    CompactionEnd,
+    Done,
+    Error,
+    ProviderEvent,
+    TokenUsage,
+    ToolCallStart,
+)
 from birdcode.agent.system_prompt.env import _AGENT_CWD
 from birdcode.agents.definition import AgentDefinition
 from birdcode.blocks import TextBlock, ThinkingBlock
@@ -313,7 +320,7 @@ class SubagentRunner:
                 ),
             )
         store = SubagentStore(self.ctx, self.project_root, self.agent_id, root=self.root)
-        state = {"tokens": 0, "input_tokens": 0, "tool_use_count": 0}
+        state = {"tokens": 0, "context_tokens": 0, "tool_use_count": 0}
         error_msg: str | None = None  # 护栏/Provider Error 的消息(_emit 写,run() 读)
 
         async def _emit(ev: ProviderEvent) -> None:
@@ -335,11 +342,12 @@ class SubagentRunner:
                 # 误报 status='error'(反向 false-negative)。
                 error_msg = None
                 if ev.usage is not None:
-                    # tokens:总开销(input+output)→ SubagentReport.totalTokens(完整统计)。
-                    # input_tokens:减去缓存的输入(Anthropic input_tokens 已扣 cache_read/
-                    # cache_creation)→ 进度卡 ↓ 显示(用户要"扣缓存的输入 token")。
+                    # tokens:总开销(累计 全量 input+output)→ SubagentReport.totalTokens。
+                    # context_tokens:最近一轮 full input(provider 已归一为全量)= 当前上下文
+                    # 占用,bounded by 窗口 → 进度卡 ↓ 显示。取最新一轮(非累计):累计会随轮次
+                    # 堆叠前缀、超过窗口造成「超限」误导(见 173k 实测)。
                     state["tokens"] += ev.usage.input_tokens + ev.usage.output_tokens
-                    state["input_tokens"] += ev.usage.input_tokens
+                    state["context_tokens"] = ev.usage.input_tokens
                 if self.progress_cb is not None:
                     from birdcode.agents.report import SubagentProgress
 
@@ -349,13 +357,26 @@ class SubagentRunner:
                                 agent_id=self.agent_id,
                                 description=self.description,
                                 elapsed_ms=_elapsed_ms(started),
-                                input_tokens=state["input_tokens"],
+                                context_tokens=state["context_tokens"],
+                                context_window=self.cfg.context_window,
                                 tool_use_count=state["tool_use_count"],
                                 phase="running",
                             )
                         )
                     except Exception:  # noqa: BLE001 - progress 是 best-effort,绝不杀子 agent
                         log.debug("subagent progress_cb 失败,忽略(不杀子 agent)", exc_info=True)
+            elif isinstance(ev, CompactionEnd):
+                # 压缩事件落侧链(纯观测:type=system/subtype=compact_event,不含摘要内容/尾段)。
+                # decode_lines 跳过(type 非 user/assistant)、find_last_boundary_idx 不认(非
+                # compact_boundary)→ resume 照常重载全量 + 首轮自愈重压;事件行只供排错可见。
+                try:
+                    await store.append_compaction_event(
+                        trigger=ev.reason,
+                        summary=ev.summary,
+                        fell_back=ev.fell_back,
+                    )
+                except Exception:  # noqa: BLE001 - 观测落盘失败不杀子 agent
+                    log.debug("记录子 agent 压缩事件失败,忽略", exc_info=True)
 
         async def _on_message(
             msg: Message,
@@ -371,7 +392,7 @@ class SubagentRunner:
             )
 
         async def _progress_tick() -> None:
-            """每秒刷一次进度(仅 elapsed_ms;tokens/tool_use_count 复用当前累计 state,
+            """每秒刷一次进度(仅 elapsed_ms;context_tokens/tool_use_count 复用最近一轮 state,
             仍只在每轮 Done 变化)。让长跑子 agent 的时间持续走,而非轮次粒度停滞。"""
             from birdcode.agents.report import SubagentProgress
 
@@ -454,8 +475,15 @@ class SubagentRunner:
                 system_override=_system_override(self.defn, self.isolation),
                 mcp_instructions=mcp_instructions,
             )
-            # 一次性子 agent:不接 ContextManager(history 不跨轮累积,无需 maybe_compact)。
-            child_context: ContextManager | None = None
+            # 子 agent 接全量压缩兜底(enable_snip=False:只 _compact 摘要,不 snip 裁剪);
+            # store=None 走内存压缩(侧链不落摘要/尾段)。撞 autocompact_threshold → 摘要;
+            # 413 → react 硬截断(context 非 None 才进 agent_loop 的 react 分支,不再上抛崩溃)。
+            child_context = ContextManager(
+                provider=child_provider,
+                store=None,
+                cfg=self.cfg,
+                enable_snip=False,
+            )
             history: list[Turn]
             if self.resume_from is not None:
                 # resume 模式(T4):侧链当 history(只重放旧轮次,含已执行工具——不重执,

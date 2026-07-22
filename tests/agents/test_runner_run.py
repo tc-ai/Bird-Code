@@ -1,4 +1,6 @@
 # tests/agents/test_runner_run.py
+import json
+
 import pytest
 
 from birdcode.agent.provider import Done, Error, TextDelta, TokenUsage, ToolCallStart
@@ -89,6 +91,31 @@ class _ErrorThenRecoverProvider:
         return _gen()
 
 
+class _CacheBearingProvider:
+    """yield Done 携带归一后的全量 input_tokens + 缓存字段(复刻 anthropic_provider 修复后输出)。
+
+    全量 1333 = miss 629 + cache_read 704;用于验证进度卡 ↓ tokens 去缓存显示 629(非 1333)。
+    """
+
+    def __init__(self, profile):
+        self.profile = profile
+
+    def stream(self, messages, *, history):  # noqa: ARG002
+        async def _gen():
+            yield TextDelta(text="完成")
+            yield Done(
+                usage=TokenUsage(
+                    input_tokens=1333,
+                    output_tokens=5,
+                    cache_read_tokens=704,
+                    cache_creation_tokens=0,
+                ),
+                stop_reason="end_turn",
+            )
+
+        return _gen()
+
+
 def _cfg():
     return AppConfig(
         providers={
@@ -122,6 +149,8 @@ def _patch_build_provider(monkeypatch):
             return _OneToolThenTextProvider(profile=profile)
         if state.get("use_tool"):
             return _ToolFakeProvider(profile=profile)
+        if state.get("cache_usage"):
+            return _CacheBearingProvider(profile=profile)
         return _FakeProvider(profile=profile, text=state["text"])
 
     monkeypatch.setattr(runner, "build_provider", _fake)
@@ -353,6 +382,105 @@ async def test_run_progress_cb_failure_isolated(tmp_path):
     report = await r.run()
     assert report.status == "completed"  # 非 error
     assert report.is_completed is True
+
+
+async def test_progress_card_shows_current_context(tmp_path, _patch_build_provider):
+    """进度卡 ↓ = 最近一轮 full input(当前上下文占用),非累计、非去缓存。
+
+    provider 归一后 usage.input_tokens 即全量;卡片取最近一轮 Done 的全量作「当前上下文」,
+    bounded by 窗口(用户要的口径:占用/上限,不会像累计那样超过窗口)。
+    """
+    _patch_build_provider["cache_usage"] = True
+    cfg = _cfg()
+    parent_provider = _FakeProvider(profile=cfg.providers["p"])
+    captured: list = []
+
+    async def _cap(p):
+        captured.append(p)
+
+    r = SubagentRunner(
+        defn=_defn(),
+        prompt="p",
+        description="d",
+        tool_use_id="call_c",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
+        parent_provider=parent_provider,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=cfg,
+        app=None,
+        ctx=_ctx(),
+        project_root=tmp_path,
+        root=tmp_path,
+        progress_cb=_cap,
+    )
+    report = await r.run()
+    # 卡片 ↓ = 最近一轮 full = 1333(非累计、非去缓存 629)
+    assert captured and captured[-1].context_tokens == 1333
+    assert captured[-1].context_window == cfg.context_window
+    # totalTokens 仍是累计全量 input+output = 1333 + 5(总开销,与本卡口径不同)
+    assert report.tokens == 1338
+
+
+async def test_subagent_wires_compaction_and_records_event(tmp_path, monkeypatch):
+    """子 agent 接 ContextManager(enable_snip=False) + 压缩事件落侧链(compact_event 行)。
+
+    monkeypatch run_agent_loop 模拟「压缩发生」(emit CompactionEnd),验证:
+    ① runner 构造了非 None 的 ContextManager 且 enable_snip=False(只全量压缩、不 snip);
+    ② _emit 收到 CompactionEnd → store.append_compaction_event 写 compact_event 行;
+    ③ 该行被 decode_lines 跳过(type=system),不破坏侧链加载。
+    """
+    from birdcode.agent.context import ContextManager
+    from birdcode.agent.provider import CompactionEnd
+    from birdcode.agents import runner as runner_mod
+    from birdcode.session.subagent_store import read_subagent_transcript
+
+    parent_provider = _FakeProvider(profile=_cfg().providers["p"])
+    captured: dict = {}
+
+    async def _fake_loop(*, context, emit, **_):  # noqa: ANN001
+        captured["context"] = context
+        await emit(CompactionEnd(reason="auto", summary="已压缩 100→50 token", fell_back=False))
+
+    monkeypatch.setattr(runner_mod, "run_agent_loop", _fake_loop)
+
+    r = SubagentRunner(
+        defn=_defn(),
+        prompt="p",
+        description="d",
+        tool_use_id="call_z",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
+        parent_provider=parent_provider,
+        parent_registry=None,
+        parent_gate=None,
+        cfg=_cfg(),
+        app=None,
+        ctx=_ctx(),
+        project_root=tmp_path,
+        root=tmp_path,
+    )
+    await r.run()
+
+    # ① 接了 ContextManager、关了 snip(只全量压缩)
+    ctx = captured.get("context")
+    assert isinstance(ctx, ContextManager)
+    assert ctx._enable_snip is False
+    # ② 侧链有 compact_event 行
+    sidechain = r.sidechain_path
+    assert sidechain.exists()
+    raw = sidechain.read_text(encoding="utf-8").splitlines()
+    rows = [json.loads(ln) for ln in raw if ln.strip()]
+    events = [row for row in rows if row.get("subtype") == "compact_event"]
+    assert len(events) == 1
+    assert events[0]["compact"]["summary"] == "已压缩 100→50 token"
+    assert events[0]["compact"]["trigger"] == "auto"
+    assert events[0]["isSidechain"] is True
+    # ③ 事件行被 decode 跳过,不破坏侧链加载(无崩溃)
+    assert isinstance(read_subagent_transcript(sidechain), list)
 
 
 def test_system_override_appends_worktree_addendum():

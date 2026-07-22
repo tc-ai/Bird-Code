@@ -164,11 +164,13 @@ class ContextManager:
         cfg: AppConfig,
         *,
         estimator: TokenEstimator | None = None,
+        enable_snip: bool = True,
     ) -> None:
         self._provider = provider
         self._store = store
         self._cfg = cfg
         self._est = estimator or TokenEstimator()
+        self._enable_snip = enable_snip
         # 刚构造(resume 首估)/ 刚压缩 / 刚 react 后,last_in 陈旧(= 截断前的大 input),
         # 直接用会误触发 Autocompact。置 True → 下次 maybe_compact 走冷启动估一次、消费清零。
         self._stale_anchor = True
@@ -341,7 +343,8 @@ class ContextManager:
                 history, trigger="auto", pre_tokens=est, on_activity=on_activity
             )
         # 接近但未到阈值 → Tier1 snip(确定性清旧 tool_result content,零 LLM 成本推迟摘要)。
-        if est >= self._tier1_threshold():
+        # enable_snip=False(子 agent 只要全量压缩)→ 跳过 snip,留给 _compact 撞阈时一次性摘要。
+        if self._enable_snip and est >= self._tier1_threshold():
             return await self._snip(history, current=current, on_activity=on_activity)
         return None
 

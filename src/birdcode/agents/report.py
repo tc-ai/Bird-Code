@@ -18,7 +18,8 @@ class SubagentProgress:
     agent_id: str
     description: str
     elapsed_ms: int
-    input_tokens: int  # 减去缓存的输入(Anthropic input_tokens 累加,已扣 cache_read/creation)
+    context_tokens: int  # 最近一轮 full input(当前上下文占用,bounded by context_window)
+    context_window: int  # 窗口上限(卡片显示 占用/上限)
     tool_use_count: int
     phase: str  # "running"(完成由 ToolResult 自然替换卡片)
 

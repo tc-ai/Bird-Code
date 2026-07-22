@@ -91,6 +91,26 @@ class SubagentStore:
         self._last_uuid = new_uuid
         return new_uuid
 
+    async def append_compaction_event(self, *, trigger: str, summary: str, fell_back: bool) -> None:
+        """记录一次压缩事件(纯观测,不含摘要内容/尾段)。
+
+        type=system + subtype=compact_event:decode_lines 跳过(type 非 user/assistant)、
+        find_last_boundary_idx 不认(非 compact_boundary)→ resume 照常重载全量 + 首轮自愈重压,
+        事件行只供 read_history/排错可见。不更新 _last_uuid(不进消息 parentUuid 链,保持旁观)。
+        IO 失败只 log(write_jsonl_line 内部记录),不杀子 agent。
+        """
+        line: dict[str, Any] = {
+            "type": "system",
+            "subtype": "compact_event",
+            "isSidechain": True,
+            "agentId": self._agent_id,
+            "uuid": str(_uuid.uuid4()),
+            "parentUuid": self._last_uuid,
+            "timestamp": utc_iso(),
+            "compact": {"trigger": trigger, "summary": summary, "fellBack": fell_back},
+        }
+        write_jsonl_line(self._fh, line, label="subagent compact_event")
+
     async def load_and_repair_sidechain(self, path: Path | None = None) -> list[Turn]:
         """读侧链 + 末尾修复 + 【持久化合成消息】(镜像 SessionStore.load_mainline)。
 

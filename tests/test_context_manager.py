@@ -277,6 +277,34 @@ async def test_snip_clears_largest_first_and_protects_last_turn():
     assert blocks_recent[0].content == "w" * 1000
 
 
+async def test_enable_snip_false_skips_snip_entirely():
+    """enable_snip=False:est 在 [tier1, threshold) 也不 snip,tool_result 原样保留。
+
+    子 agent 只接全量压缩(_compact)、不要 snip 裁剪。同 history 在默认 enable_snip=True
+    下会 snip(见 test_snip_clears_largest_first...);False 下 maybe_compact 返回 None、
+    不改任何 block(留给 _compact 在撞 autocompact_threshold 时一次性摘要)。
+    """
+    from birdcode.agent.context import _SNIP_PLACEHOLDER
+
+    cm = ContextManager(
+        provider=_SummaryProvider(),
+        store=None,
+        cfg=_make_cfg(),
+        estimator=TokenEstimator(),
+        enable_snip=False,
+    )
+    cm._stale_anchor = False
+    tier1 = cm._tier1_threshold()
+    old = _results_turn("x" * 1000, "y" * 50000, "z" * 5000, "a" * 10, "a" * 10, "a" * 10, start=0)
+    recent = _results_turn("w" * 1000, start=10)
+    turns = [old, recent]
+    res = await cm.maybe_compact(history=turns, current=[], last_in=tier1 + 100)
+    assert res is None  # 不 snip(默认 True 下此处会返回 trigger="snip")
+    assert all(b.content != _SNIP_PLACEHOLDER for b in old.messages[0].content)
+    assert all(b.content != _SNIP_PLACEHOLDER for b in recent.messages[0].content)
+    assert old.messages[0].content[1].content == "y" * 50000  # 最大块原样未动
+
+
 async def test_snip_clears_only_largest_then_stops_at_clear_at_least():
     """size 优先(硬):多个可清候选里,清完最大块即满足 _SNIP_CLEAR_AT_LEAST → 立即停,
     次大/小块保留。证明贪心按 size 降序、停在最小清理量(非全清)。"""

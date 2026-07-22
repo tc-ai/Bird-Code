@@ -9,10 +9,11 @@ from birdcode.agents.report import SubagentProgress
 
 
 class SubagentCard(Static):
-    """✻ <description> … (<duration> · ↓ <input_tokens> tokens)。
+    """✻ <description> … (<duration> · ↓ <context_tokens>/<window>)。
 
-    ↓ tokens = 减去缓存的输入(Anthropic input_tokens 累加,已扣 cache_read/creation),
-    不含 output。时长/计数由 SubagentProgress 更新(Done + 每秒 tick)。
+    ↓ = 最近一轮 full input(当前上下文占用),分母为窗口上限。取最新一轮、非累计——
+    累计会随轮次堆叠前缀超过窗口,造成「超限」误导。时长/计数由 SubagentProgress 更新
+    (Done + 每秒 tick)。
     """
 
     DEFAULT_CSS = """
@@ -49,7 +50,7 @@ class SubagentCard(Static):
         p = self._progress
         return (
             f"✻ {p.description} … ({self._format_duration(p.elapsed_ms)} · "
-            f"↓ {self._format_tokens(p.input_tokens)} tokens)"
+            f"↓ {self._format_tokens(p.context_tokens)}/{self._format_tokens(p.context_window)})"
         )
 
     def render(self) -> str:
