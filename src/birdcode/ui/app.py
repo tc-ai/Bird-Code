@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     from birdcode.ui.commands.registry import CommandRegistry
     from birdcode.ui.widgets.choice_prompt import ChoicePrompt
     from birdcode.ui.widgets.completion_menu import CompletionMenu
+    from birdcode.ui.widgets.file_completion_menu import FileCompletionMenu
     from birdcode.ui.widgets.permission_prompt import PermissionPrompt
     from birdcode.ui.widgets.subagent_card import SubagentCard
 
@@ -168,7 +169,7 @@ class BirdApp(App[None]):
 
             command_registry = build_builtin_registry()
         self._command_registry = command_registry
-        self._completion_menu: CompletionMenu | None = None
+        self._completion_menu: CompletionMenu | FileCompletionMenu | None = None
         self._permission_prompt: PermissionPrompt | None = None
         self._choice_prompt: ChoicePrompt | None = None
         self.model = model
@@ -898,19 +899,50 @@ class BirdApp(App[None]):
         """补全浮层:挂 #composer 末尾(StatusBar 下方)→ composer 长高、输入框上移让位。
 
         已开则就地 update 候选(输入实时过滤时复用同一浮层,避免每键重挂闪烁)。
+        若当前挂的是 FileCompletionMenu(@ 浮层,粘贴式整段替换 /@ 切换的边界),
+        先卸载再挂 CompletionMenu,避免把 Command 候选喂给 @ 浮层。
         """
+        from birdcode.ui.widgets.completion_menu import CompletionMenu
+
         menu = self._completion_menu
+        if not isinstance(menu, CompletionMenu):
+            if menu is not None:  # FileCompletionMenu 残留 → 先卸载
+                self._dismiss_completion()
+            menu = None
         if menu is not None:
             menu.update(event.candidates)
             return
-        from birdcode.ui.widgets.completion_menu import CompletionMenu
-
         menu = CompletionMenu(event.candidates)
         self._completion_menu = menu
         try:
             await self.query_one("#composer").mount(menu)
         except Exception:
             log.debug("mount completion menu failed", exc_info=True)
+            self._completion_menu = None
+
+    @on(InputArea.FileCompletionRequested)
+    async def _on_file_completion_requested(self, event: InputArea.FileCompletionRequested) -> None:
+        """@ 文件补全浮层:挂 FileCompletionMenu 到 #composer 末尾。
+
+        已开同类型 → 就地 update 候选 + truncated(实时过滤复用同一浮层)。
+        若当前挂的是 CompletionMenu(命令浮层,@→/ 切换残留),先卸载再挂。
+        """
+        from birdcode.ui.widgets.file_completion_menu import FileCompletionMenu
+
+        menu = self._completion_menu
+        if not isinstance(menu, FileCompletionMenu):
+            if menu is not None:  # CompletionMenu 残留 → 先卸载
+                self._dismiss_completion()
+            menu = None
+        if menu is not None:
+            menu.update(event.candidates, event.truncated)
+            return
+        menu = FileCompletionMenu(event.candidates, event.truncated)
+        self._completion_menu = menu
+        try:
+            await self.query_one("#composer").mount(menu)
+        except Exception:
+            log.debug("mount file completion menu failed", exc_info=True)
             self._completion_menu = None
 
     def _dismiss_completion(self) -> None:

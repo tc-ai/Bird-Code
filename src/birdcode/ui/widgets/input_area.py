@@ -16,11 +16,20 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from textual import events
 from textual.message import Message
 from textual.widgets import TextArea
 
-from birdcode.ui.pure import enter_action
+from birdcode.ui.pure import (
+    AtToken,
+    FileCandidate,
+    enter_action,
+    list_file_candidates,
+    parse_at_token,
+)
+from birdcode.ui.widgets.file_completion_menu import FileCompletionMenu
 
 
 def command_prefix(line: str) -> str:
@@ -35,6 +44,10 @@ class InputArea(TextArea):
         "InputArea { border: none; padding: 0 1; height: 1; } InputArea:focus { border: none; }"
     )
 
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._active_at: AtToken | None = None
+
     class Submitted(Message):
         def __init__(self, text: str) -> None:
             self.text = text
@@ -47,10 +60,23 @@ class InputArea(TextArea):
             self.candidates = candidates
             super().__init__()
 
+    class FileCompletionRequested(Message):
+        """@ 文件补全:请求 app 挂 FileCompletionMenu 浮层。"""
+
+        def __init__(self, candidates: list[FileCandidate], truncated: bool, at: AtToken) -> None:
+            self.candidates = candidates
+            self.truncated = truncated
+            self.at = at
+            super().__init__()
+
     async def _on_key(self, event: events.Key) -> None:
         # 补全浮层打开时优先处理导航/确认;Esc 由 app.action_interrupt 收口。
         menu = getattr(self.app, "_completion_menu", None)
-        if menu is not None:
+        if isinstance(menu, FileCompletionMenu):
+            if await self._on_at_menu_key(event, menu):
+                return
+            # 未拦截的键(可见字符/退格)放行 → 文本变化触发 _route_completion 重新过滤
+        elif menu is not None:
             if event.key == "up":
                 menu.move(-1)
                 event.stop()
@@ -93,6 +119,41 @@ class InputArea(TextArea):
         # ctrl+c / ctrl+v 不再拦截 → 交给 TextArea 内建的 copy/paste（OSC 52）。
         # 中断/退出改为应用级绑定：Esc 中断、Ctrl+Q 退出。
         await super()._on_key(event)
+
+    async def _on_at_menu_key(self, event: events.Key, menu: FileCompletionMenu) -> bool:
+        """@ 浮层打开时的键位处理。返回 True 表示已拦截。"""
+        if event.key in ("up", "down"):
+            menu.move(-1 if event.key == "up" else 1)
+            event.stop()
+            event.prevent_default()
+            return True
+        if event.key in ("tab", "enter"):
+            cand = menu.selected_candidate()
+            if cand is not None:
+                # 目录(Tab):补 full_path(带尾 /)→ changed 自动展开下一级;
+                # 文件或 Enter:补 full_path + 空格(闭合 token)。
+                trail = "" if (event.key == "tab" and cand.is_dir) else " "
+                self._replace_at_token(cand.full_path + trail)
+                self.app._dismiss_completion()
+                self._active_at = None
+            event.stop()
+            event.prevent_default()
+            return True
+        return False
+
+    def _replace_at_token(self, replacement: str) -> None:
+        """把当前 @token([start_col, cursor_col) 区间)替换为 replacement,光标到替换末尾。"""
+        at = self._active_at
+        if at is None:
+            return
+        row, col = self.cursor_location
+        start = at.start_col
+        if col < start:
+            return
+        self.delete((row, start), (row, col))
+        self.insert(replacement, (row, start))
+        self.move_cursor((row, start + len(replacement)))
+        self.refresh()
 
     async def _try_complete(self) -> None:
         """Tab 补全:单匹配直接补全名+空格;多匹配 post CompletionRequested。"""
@@ -161,7 +222,7 @@ class InputArea(TextArea):
         # 随【软换行后的视觉行数】伸缩（1..10）；soft_wrap=True 时长行自动折行
         n = max(1, min(self.wrapped_document.height, 10))
         self.styles.height = n
-        self._maybe_auto_complete()
+        self._route_completion()
 
     def _maybe_auto_complete(self) -> None:
         """输入以 "/" 开头且尚在命令名段(无空格) → 弹/更新补全浮层;否则关闭。
@@ -186,3 +247,49 @@ class InputArea(TextArea):
             dismiss()
             return
         self.post_message(InputArea.CompletionRequested(cands))
+
+    def _route_completion(self) -> None:
+        """命令名段(/开头无空格)→ 命令补全;否则 → @ 文件补全。二者互斥。
+
+        非命令态下,仅在没有活跃 @ 会话(_active_at is None)时才调用
+        _maybe_auto_complete——它在非命令态会 dismiss,可顺带关掉命令态残留
+        的命令浮层;若有 @ 会话则交给 _maybe_complete_at 专管 @ 浮层,避免
+        _maybe_auto_complete 误关 @ 浮层。
+        """
+        if self.text.startswith("/") and " " not in self.text:
+            self._maybe_auto_complete()
+            return
+        if self._active_at is None:
+            self._maybe_auto_complete()
+        self._maybe_complete_at()
+
+    def _maybe_complete_at(self) -> None:
+        """光标处若有活跃 @ token → 弹/更新 @ 浮层;否则(且我们正管 @ 浮层时)关闭。
+
+        app 无补全机制(非 BirdApp 测试 harness)时为 no-op。
+        """
+        app = self.app
+        dismiss = getattr(app, "_dismiss_completion", None)
+        if dismiss is None:
+            return
+        row, col = self.cursor_location
+        line = self.document.get_line(row)
+        at = parse_at_token(line, col)
+        if at is None:
+            if self._active_at is not None:
+                self._active_at = None
+                dismiss()
+            return
+        if "/" in at.prefix:
+            base_rel, _, name_prefix = at.prefix.rpartition("/")
+        else:
+            base_rel, name_prefix = "", at.prefix
+        base_dir = Path.cwd() / base_rel if base_rel else Path.cwd()
+        cands, truncated = list_file_candidates(base_dir, name_prefix, base_rel)
+        if not cands:
+            if self._active_at is not None:
+                self._active_at = None
+                dismiss()
+            return
+        self._active_at = at
+        self.post_message(InputArea.FileCompletionRequested(cands, truncated, at))

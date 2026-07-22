@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -115,3 +116,86 @@ def format_context_report(usage: ContextUsage, model: str) -> str:
     else:
         lines.append("(估算；尚无 API 实测)")
     return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class AtToken:
+    """输入行中一个活跃的 @ 文件引用 token。
+
+    at_col:   @ 所在列;start_col: @ 之后首个字符的列(替换区间左端)。
+    prefix:   line[start_col:cursor_col](不含 @),可含 "/"(路径段)。
+    """
+
+    at_col: int
+    start_col: int
+    prefix: str
+
+
+def parse_at_token(line: str, cursor_col: int) -> AtToken | None:
+    """从光标往左找最近的 @,命中返回 AtToken,否则 None。
+
+    触发条件:① cursor 在 [0, len(line)];② @ 到 cursor 间无空白;
+    ③ @ 前为行首或空白(避免邮箱 a@b 误触)。
+    """
+    if cursor_col < 0 or cursor_col > len(line):
+        return None
+    segment = line[:cursor_col]
+    at_idx = segment.rfind("@")
+    if at_idx == -1:
+        return None
+    between = segment[at_idx + 1 :]
+    if " " in between or "\t" in between:
+        return None
+    if at_idx > 0 and line[at_idx - 1] not in (" ", "\t"):
+        return None
+    return AtToken(at_col=at_idx, start_col=at_idx + 1, prefix=between)
+
+
+@dataclass(frozen=True)
+class FileCandidate:
+    """一个文件/目录补全候选。
+
+    name:      条目名,目录带尾 "/"(渲染与区分用)。
+    full_path: 相对 cwd 的插入路径,统一正斜杠。
+    is_dir:    是否目录。
+    """
+
+    name: str
+    full_path: str
+    is_dir: bool
+
+
+_MAX_FILE_CANDIDATES = 100
+
+
+def list_file_candidates(
+    base_dir: Path, name_prefix: str, base_rel: str
+) -> tuple[list[FileCandidate], bool]:
+    """列 base_dir 下前缀匹配 name_prefix(大小写不敏感)的条目。
+
+    返回 (候选, 是否截断)。隐藏点文件过滤;目录在前、各自字母序;限流 100。
+    base_rel 为相对 cwd 的路径段(正斜杠),用于拼 full_path;为空则不带前缀。
+    base_dir 不存在 / 无权限 / 其它 OSError → ([], False)。
+    """
+    dirs: list[FileCandidate] = []
+    files: list[FileCandidate] = []
+    pre = f"{base_rel}/" if base_rel else ""
+    needle = name_prefix.lower()
+    try:
+        with os.scandir(base_dir) as it:
+            for entry in it:
+                n = entry.name
+                if n.startswith(".") or not n.lower().startswith(needle):
+                    continue
+                if entry.is_dir():
+                    dirs.append(FileCandidate(n + "/", pre + n + "/", True))
+                else:
+                    files.append(FileCandidate(n, pre + n, False))
+    except OSError:
+        return [], False
+    dirs.sort(key=lambda c: c.name.lower())
+    files.sort(key=lambda c: c.name.lower())
+    out = dirs + files
+    if len(out) <= _MAX_FILE_CANDIDATES:
+        return out, False
+    return out[:_MAX_FILE_CANDIDATES], True
