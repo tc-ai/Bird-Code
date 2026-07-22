@@ -271,6 +271,9 @@ class SubagentRunner:
         self.root = root
         self.progress_cb = progress_cb
         # 续跑(T4):注入旧 agent_id 复用(指向既有侧链/meta);None→新生成 sub-{uuid12}。
+        # _progress_tick 周期(秒):测试可注入小值确定性触发 tick(默认 1s——测试 provider 亚秒
+        # 完成,tick 永不触发,曾掩盖 _progress_tick 漏随 input_tokens→context_tokens 改名的 bug)。
+        self._tick_interval = 1.0
         self.agent_id = agent_id if agent_id is not None else f"sub-{_uuid.uuid4().hex[:12]}"
         self.resume_from = resume_from  # 非空 → resume 模式:加载侧链为 history、跳过播种
         self._worktree_name = worktree_store_name(ctx.cwd)  # 侧链与主会话同 worktree/<name>/
@@ -323,6 +326,21 @@ class SubagentRunner:
         state = {"tokens": 0, "context_tokens": 0, "tool_use_count": 0}
         error_msg: str | None = None  # 护栏/Provider Error 的消息(_emit 写,run() 读)
 
+        def _make_progress():  # 返回 SubagentProgress(模块顶层 import 会循环,lazy + 不标注)
+            # 单一构造点:Done 处理器与 _progress_tick 共用,杜绝两处分叉漂移
+            # (曾致 tick 漏随 input_tokens→context_tokens 改名,每秒抛 KeyError/TypeError 被吞,
+            # 进度计时器对所有子 agent 静默失效)。
+            from birdcode.agents.report import SubagentProgress
+
+            return SubagentProgress(
+                agent_id=self.agent_id,
+                description=self.description,
+                elapsed_ms=_elapsed_ms(started),
+                context_tokens=state["context_tokens"],
+                tool_use_count=state["tool_use_count"],
+                phase="running",
+            )
+
         async def _emit(ev: ProviderEvent) -> None:
             nonlocal error_msg
             # 不向主 UI 流式展示文本;仅累计 tokens/工具数 + 节流进度。
@@ -349,20 +367,8 @@ class SubagentRunner:
                     state["tokens"] += ev.usage.input_tokens + ev.usage.output_tokens
                     state["context_tokens"] = ev.usage.input_tokens
                 if self.progress_cb is not None:
-                    from birdcode.agents.report import SubagentProgress
-
                     try:
-                        await self.progress_cb(
-                            SubagentProgress(
-                                agent_id=self.agent_id,
-                                description=self.description,
-                                elapsed_ms=_elapsed_ms(started),
-                                context_tokens=state["context_tokens"],
-                                context_window=self.cfg.context_window,
-                                tool_use_count=state["tool_use_count"],
-                                phase="running",
-                            )
-                        )
+                        await self.progress_cb(_make_progress())
                     except Exception:  # noqa: BLE001 - progress 是 best-effort,绝不杀子 agent
                         log.debug("subagent progress_cb 失败,忽略(不杀子 agent)", exc_info=True)
             elif isinstance(ev, CompactionEnd):
@@ -392,25 +398,17 @@ class SubagentRunner:
             )
 
         async def _progress_tick() -> None:
-            """每秒刷一次进度(仅 elapsed_ms;context_tokens/tool_use_count 复用最近一轮 state,
-            仍只在每轮 Done 变化)。让长跑子 agent 的时间持续走,而非轮次粒度停滞。"""
-            from birdcode.agents.report import SubagentProgress
+            """每秒刷一次进度(仅 elapsed_ms 稳定走;context_tokens/tool_use_count 复用最近一轮
+            state,仍只在每轮 Done 变化)。让长跑子 agent 的时间持续走,而非轮次粒度停滞。
 
+            进度构造统一走 _make_progress(与 Done 处理器同源),杜绝两处漂移。周期用
+            self._tick_interval(默认 1s;测试注入小值以确定性触发)。"""
             while True:
-                await asyncio.sleep(1)
+                await asyncio.sleep(self._tick_interval)
                 if self.progress_cb is None:
                     continue
                 try:
-                    await self.progress_cb(
-                        SubagentProgress(
-                            agent_id=self.agent_id,
-                            description=self.description,
-                            elapsed_ms=_elapsed_ms(started),
-                            input_tokens=state["input_tokens"],
-                            tool_use_count=state["tool_use_count"],
-                            phase="running",
-                        )
-                    )
+                    await self.progress_cb(_make_progress())
                 except Exception:  # noqa: BLE001 - tick best-effort,绝不杀子 agent
                     log.debug("subagent progress tick 失败,忽略", exc_info=True)
 

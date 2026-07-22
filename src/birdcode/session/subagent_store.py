@@ -97,6 +97,8 @@ class SubagentStore:
         type=system + subtype=compact_event:decode_lines 跳过(type 非 user/assistant)、
         find_last_boundary_idx 不认(非 compact_boundary)→ resume 照常重载全量 + 首轮自愈重压,
         事件行只供 read_history/排错可见。不更新 _last_uuid(不进消息 parentUuid 链,保持旁观)。
+        携带 sessionId/cwd/version/gitBranch(与 user/assistant/system 各行同 convention,经
+        SystemLine/UserLine/AssistantLine 的 by_alias 落盘键),使观测行自洽可定位,无需跨行反查。
         IO 失败只 log(write_jsonl_line 内部记录),不杀子 agent。
         """
         line: dict[str, Any] = {
@@ -104,6 +106,10 @@ class SubagentStore:
             "subtype": "compact_event",
             "isSidechain": True,
             "agentId": self._agent_id,
+            "sessionId": self._ctx.session_id,
+            "cwd": self._ctx.cwd,
+            "version": self._ctx.version,
+            "gitBranch": self._ctx.git_branch,
             "uuid": str(_uuid.uuid4()),
             "parentUuid": self._last_uuid,
             "timestamp": utc_iso(),

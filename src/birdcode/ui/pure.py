@@ -61,9 +61,17 @@ def enter_action(line: str) -> str:
 
 
 def _fmt_tokens(n: int) -> str:
-    """token → 人类可读：≥1000 显示 '1.7k'（1 位小数），否则整数。"""
+    """token → 人类可读:≥1M 显示 '1m',≥1k 显示 '1.7k',否则整数。
+
+    百万级用小写 m,整数剥 .0(:g);k 舍入到 1000 也升级 m,杜绝 '1000.0k'。
+    """
+    if n >= 1_000_000:
+        return f"{round(n / 1_000_000, 1):g}m"
     if n >= 1000:
-        return f"{n / 1000:.1f}k"
+        k = round(n / 1000, 1)
+        if k >= 1000.0:  # 999_950+ rounds to 1000.0k → 升级 m
+            return f"{round(k / 1000, 1):g}m"
+        return f"{k:.1f}k"
     return str(n)
 
 

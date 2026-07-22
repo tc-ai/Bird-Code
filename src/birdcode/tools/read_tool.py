@@ -75,8 +75,10 @@ class ReadTool(Tool):
     def fork_for_child(self, *, cwd: str | None = None) -> Tool:
         """worktree 子 agent:cwd=worktree dir → 新实例 _cwd=worktree;否则继承父 _cwd。
 
-        _tool_results_dir **不透传**(子默认 None):子 agent sidecar 目录与父不同,
-        且一次性、child_context=None、无 compaction,不产生 sidecar,无需豁免。
+        _tool_results_dir **不透传**(子默认 None):子 agent 有独立(且默认空)的工具结果
+        sidecar 语义,不应共享父的 tool-results 目录(否则子能读父的 Tier1 大输出落盘)。
+        子虽接 ContextManager 全量压缩,但 store=None 走内存压缩、且不挂 tool-results 输出
+        sink → 不产生 sidecar,尺寸闸不豁免,行为同无持久化场景。
         """
         return type(self)(cwd=cwd or self._cwd)
 

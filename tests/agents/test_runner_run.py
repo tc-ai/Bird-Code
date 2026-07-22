@@ -1,4 +1,5 @@
 # tests/agents/test_runner_run.py
+import asyncio
 import json
 
 import pytest
@@ -116,6 +117,25 @@ class _CacheBearingProvider:
         return _gen()
 
 
+class _SlowDoneProvider:
+    """yield Done 前 await 一会儿,让 _progress_tick 有机会在跑期间触发。
+
+    回归 _progress_tick 漏改名 bug:tick 每 self._tick_interval 构造一次 SubagentProgress,
+    若构造抛异常被宽 except 吞 → progress_cb 仅收到 Done 那 1 次,tick 静默失效。
+    """
+
+    def __init__(self, profile, delay=0.1):
+        self.profile = profile
+        self._delay = delay
+
+    def stream(self, messages, *, history):  # noqa: ARG002
+        async def _gen():
+            await asyncio.sleep(self._delay)
+            yield Done(usage=TokenUsage(input_tokens=4242, output_tokens=0), stop_reason="end_turn")
+
+        return _gen()
+
+
 def _cfg():
     return AppConfig(
         providers={
@@ -151,6 +171,8 @@ def _patch_build_provider(monkeypatch):
             return _ToolFakeProvider(profile=profile)
         if state.get("cache_usage"):
             return _CacheBearingProvider(profile=profile)
+        if state.get("slow"):
+            return _SlowDoneProvider(profile=profile)
         return _FakeProvider(profile=profile, text=state["text"])
 
     monkeypatch.setattr(runner, "build_provider", _fake)
@@ -387,8 +409,8 @@ async def test_run_progress_cb_failure_isolated(tmp_path):
 async def test_progress_card_shows_current_context(tmp_path, _patch_build_provider):
     """进度卡 ↓ = 最近一轮 full input(当前上下文占用),非累计、非去缓存。
 
-    provider 归一后 usage.input_tokens 即全量;卡片取最近一轮 Done 的全量作「当前上下文」,
-    bounded by 窗口(用户要的口径:占用/上限,不会像累计那样超过窗口)。
+    provider 归一后 usage.input_tokens 即全量;卡片取最近一轮 Done 的全量作「当前上下文」
+    (用户要的口径:显占用量、不显窗口分母,不会像累计那样超过窗口)。
     """
     _patch_build_provider["cache_usage"] = True
     cfg = _cfg()
@@ -419,9 +441,48 @@ async def test_progress_card_shows_current_context(tmp_path, _patch_build_provid
     report = await r.run()
     # 卡片 ↓ = 最近一轮 full = 1333(非累计、非去缓存 629)
     assert captured and captured[-1].context_tokens == 1333
-    assert captured[-1].context_window == cfg.context_window
     # totalTokens 仍是累计全量 input+output = 1333 + 5(总开销,与本卡口径不同)
     assert report.tokens == 1338
+
+
+async def test_progress_tick_fires_without_error(tmp_path, _patch_build_provider):
+    """回归:_progress_tick 曾漏随 input_tokens→context_tokens 改名,每秒构造 SubagentProgress
+    抛 KeyError/TypeError,被宽 except 吞 → 进度计时器对所有子 agent 静默失效(仅轮次粒度跳变)。
+
+    注入小 tick 周期 + 慢 provider(完成前 await 让出事件循环),断言 tick 成功触发:
+    progress_cb 被调 >1 次(Done 1 次 + tick ≥1 次)。若 tick 构造抛异常被吞,captured 仅 1。
+    """
+    _patch_build_provider["slow"] = True
+    captured: list = []
+
+    async def _cap(p):
+        captured.append(p)
+
+    r = SubagentRunner(
+        defn=_defn(),
+        prompt="p",
+        description="d",
+        tool_use_id="call_tick",
+        model_override="",
+        spawn_depth=1,
+        is_async=False,
+        parent_provider=_FakeProvider(profile=_cfg().providers["p"]),
+        parent_registry=None,
+        parent_gate=None,
+        cfg=_cfg(),
+        app=None,
+        ctx=_ctx(),
+        project_root=tmp_path,
+        root=tmp_path,
+        progress_cb=_cap,
+    )
+    r._tick_interval = 0.01  # 注入小周期,免等 1s(慢 provider 跑 0.1s ≈ 10 个 tick)
+    await r.run()
+    # tick 至少触发一次:captured > 1 证明 tick 成功构造 SubagentProgress(未抛被吞)。
+    assert len(captured) >= 2
+    # tick 构造的进度字段正确:context_tokens 在 Done 前 = 0、Done 后 = 4242。
+    assert all(p.context_tokens in (0, 4242) for p in captured)
+    assert any(p.context_tokens == 4242 for p in captured)  # Done 的值确实抵达卡片
 
 
 async def test_subagent_wires_compaction_and_records_event(tmp_path, monkeypatch):

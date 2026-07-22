@@ -27,6 +27,13 @@ def test_fmt_tokens_thousands_with_one_decimal():
     assert _fmt_tokens(128000) == "128.0k"
 
 
+def test_fmt_tokens_millions_as_lowercase_m():
+    # 百万级 → 小写 m:整数百万 "1m"、非整数 "1.2m";k 舍入到 1000 升级 m(杜绝 1000.0k)
+    assert _fmt_tokens(999_999) == "1m"
+    assert _fmt_tokens(1_000_000) == "1m"
+    assert _fmt_tokens(1_234_567) == "1.2m"
+
+
 # ---- estimate_context_usage ----
 
 
